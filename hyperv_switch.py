@@ -35,6 +35,9 @@ def _apply_window_icon(window: tk.Tk | tk.Toplevel) -> None:
         pass
 
 
+MASCOT_PATH = _resource_path("chibi-cloud-watermark.png")
+
+
 # ---------------------------------------------------------------------------
 # Privilege handling
 # ---------------------------------------------------------------------------
@@ -2985,6 +2988,7 @@ class App(tk.Tk):
 
         self._mode_var = tk.StringVar(value="Basic")
         self._last_mode = "Basic"
+        self._mascot_photo = None
         self._build_ui()
         self._center(win_w, win_h)
         self._refresh_worker = None
@@ -3104,7 +3108,10 @@ class App(tk.Tk):
             font=MONO_SM, fg=MUTED, bg=BG,
         ).pack(side="left", pady=(5, 0))
 
-        mode_wrap = tk.Frame(header, bg=BG)
+        header_right = tk.Frame(header, bg=BG)
+        header_right.pack(side="right")
+
+        mode_wrap = tk.Frame(header_right, bg=BG)
         mode_wrap.pack(side="right")
 
         tk.Label(
@@ -3143,6 +3150,30 @@ class App(tk.Tk):
             bd=0,
         )
         self._mode_menu.pack(side="left")
+
+        if os.path.exists(MASCOT_PATH):
+            try:
+                mascot = tk.PhotoImage(file=MASCOT_PATH)
+                factor = max(1, int(max(mascot.width() / 86, mascot.height() / 72)))
+                self._mascot_photo = mascot.subsample(factor, factor)
+            except Exception:
+                self._mascot_photo = None
+
+        if self._mascot_photo is not None:
+            mascot_frame = tk.Frame(
+                header_right,
+                bg=PANEL_ALT,
+                highlightthickness=1,
+                highlightbackground=CARD_EDGE,
+                padx=8,
+                pady=6,
+            )
+            mascot_frame.pack(side="right", padx=(0, 14))
+            tk.Label(
+                mascot_frame,
+                image=self._mascot_photo,
+                bg=PANEL_ALT,
+            ).pack()
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(12, 8))
 

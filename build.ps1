@@ -18,6 +18,7 @@ if (-not $python) {
 & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
     --add-data "hyperswitch.ico;." `
     --add-data "hyperswitch.png;." `
+    --add-data "chibi-cloud-watermark.png;." `
     --icon hyperswitch.ico `
     --name HyperSwitch `
     hyperv_switch.py
@@ -25,6 +26,7 @@ if (-not $python) {
 & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
     --add-data "hyperswitch.ico;." `
     --add-data "hyperswitch.png;." `
+    --add-data "chibi-cloud-watermark.png;." `
     --icon hyperswitch.ico `
     --name HyperSwitchDBG `
     hyperv_switch.py

@@ -33,7 +33,7 @@ jobs:
       - name: Build Release Executable
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --add-data "hyperswitch.ico;." --add-data "hyperswitch.png;." --icon hyperswitch.ico --name HyperSwitch hyperv_switch.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --add-data "hyperswitch.ico;." --add-data "hyperswitch.png;." --add-data "chibi-cloud-watermark.png;." --icon hyperswitch.ico --name HyperSwitch hyperv_switch.py
 
       - name: Upload Workflow Artifact
         uses: actions/upload-artifact@v4
