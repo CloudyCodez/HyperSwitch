@@ -1,0 +1,11 @@
+__pycache__/
+build/
+dist/
+*.spec
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+Thumbs.db
+debugger.txt
+HSPublic1.0/
