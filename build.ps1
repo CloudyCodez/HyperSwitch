@@ -1,4 +1,10 @@
+param(
+    [string]$Version = "dev"
+)
+
 $ErrorActionPreference = "Stop"
+
+$packageVersion = if ($Version -like "v*") { $Version } else { "v$Version" }
 
 $pythonCandidates = @(
     "C:\Users\conno\AppData\Local\Python\bin\python.exe",
@@ -35,3 +41,7 @@ Write-Host ""
 Write-Host "Build complete:"
 Write-Host "  dist\\HyperSwitch.exe"
 Write-Host "  dist\\HyperSwitchDBG.exe"
+
+& $python scripts\package_release.py --version $packageVersion
+
+Write-Host "  out\\HyperSwitch-$packageVersion-portable.zip"

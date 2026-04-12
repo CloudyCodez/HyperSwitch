@@ -25,13 +25,14 @@ python hyperv_switch.py
 ## Build The Executable
 
 ```powershell
-.\build.ps1
+.\build.ps1 -Version 1.0.2
 ```
 
 This creates:
 
 - `dist\HyperSwitch.exe`
 - `dist\HyperSwitchDBG.exe`
+- `out\HyperSwitch-v<version>-portable.zip`
 
 ## Usage Notes
 
@@ -48,8 +49,9 @@ This creates:
 
 The repo includes a GitHub Actions workflow at `.github/workflows/release.yml`.
 
-- Pushing a tag like `v1.0.0` builds `HyperSwitch.exe`
-- The workflow uploads the executable as a workflow artifact
+- Pushing a tag like `v1.0.2` builds `HyperSwitch.exe`, `HyperSwitchDBG.exe`, and a portable zip bundle
+- The portable zip keeps `HyperSwitch.exe` at the top level and tucks docs, source files, assets, and debug tools into subfolders
+- The workflow uploads the build outputs as workflow artifacts
 - Tagged builds are published to GitHub Releases automatically
 
 ## License

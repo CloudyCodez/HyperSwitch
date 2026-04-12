@@ -1343,6 +1343,37 @@ def _clear_caches() -> None:
     _CI_CACHE = _CACHE_MISS
 
 
+def _collect_basic_snapshot() -> dict:
+    _prime_platform_cache()
+    _prime_device_guard_cache()
+    _prime_processor_cache()
+    dse = dse_is_enforced()
+    return {
+        "hyperv": hyperv_status(),
+        "hyperv_feature": hyperv_feature_enabled(),
+        "dse": dse,
+        "dse_partial": _dse_partial_enforcement() if dse is False else [],
+        "vbs": vbs_is_active(),
+        "cpuvirt": cpu_virt_status(),
+    }
+
+
+def _collect_advanced_snapshot() -> dict:
+    _prime_platform_cache()
+    _prime_device_guard_cache()
+    _prime_processor_cache()
+    vendor = _get_cpu_vendor()
+    return {
+        "vendor": vendor,
+        "credguard": credential_guard_status(),
+        "bitlocker": _bitlocker_protection_on(),
+        "secureboot": _secure_boot_enabled(),
+        "hello": windows_hello_status(),
+        "meltdown": None if vendor == "amd" else meltdown_is_protected(),
+        "spectre": spectre_is_protected(),
+    }
+
+
 def _service_is_running(service_name: str) -> bool:
     if service_name in _SERVICE_CACHE:
         cached = _SERVICE_CACHE[service_name]
@@ -3412,26 +3443,22 @@ class App(tk.Tk):
             self._refresh_pending = True
             return
 
+        include_advanced = not self._basic_mode()
+
         def worker():
             _clear_caches()
             data = {}
             try:
-                _prime_platform_cache()
-                _prime_device_guard_cache()
-                _prime_processor_cache()
-                data["hyperv"] = hyperv_status()
-                data["hyperv_feature"] = hyperv_feature_enabled()
-                data["dse"] = dse_is_enforced()
-                data["dse_partial"] = _dse_partial_enforcement() if data["dse"] is False else []
-                data["vbs"] = vbs_is_active()
-                data["cpuvirt"] = cpu_virt_status()
+                data.update(_collect_basic_snapshot())
+                if include_advanced:
+                    data.update(_collect_advanced_snapshot())
             except Exception:
                 pass
 
             def apply():
                 try:
                     self._apply_snapshot(data)
-                    if not self._basic_mode():
+                    if not include_advanced and not self._basic_mode():
                         self._refresh_advanced_async()
                 finally:
                     if self._refresh_pending:
@@ -3465,6 +3492,19 @@ class App(tk.Tk):
             self._apply_cpuvirt(cpuvirt_state, cpuvirt_source)
         except Exception:
             self._refresh_cpuvirt()
+        if "vendor" in data:
+            try:
+                vendor = data.get("vendor", "unknown")
+                self._apply_meltdown(vendor, data.get("meltdown", None))
+                self._apply_spectre(vendor, data.get("spectre", None))
+                runtime, configured = data.get("credguard", (None, None))
+                self._apply_credguard(runtime, configured)
+                self._apply_bitlocker(data.get("bitlocker", None))
+                self._apply_secureboot(data.get("secureboot", None))
+                allowed, source = data.get("hello", (None, ""))
+                self._apply_windows_hello(allowed, source)
+            except Exception:
+                self._refresh_advanced_async()
 
     def _refresh_advanced_async(self) -> None:
         if self._basic_mode():
@@ -3477,17 +3517,7 @@ class App(tk.Tk):
             _clear_caches()
             data = {}
             try:
-                _prime_platform_cache()
-                _prime_device_guard_cache()
-                _prime_processor_cache()
-                data["vendor"] = _get_cpu_vendor()
-                data["credguard"] = credential_guard_status()
-                data["bitlocker"] = _bitlocker_protection_on()
-                data["secureboot"] = _secure_boot_enabled()
-                data["hello"] = windows_hello_status()
-                vendor = data["vendor"]
-                data["meltdown"] = None if vendor == "amd" else meltdown_is_protected()
-                data["spectre"] = spectre_is_protected()
+                data.update(_collect_advanced_snapshot())
             except Exception:
                 pass
 

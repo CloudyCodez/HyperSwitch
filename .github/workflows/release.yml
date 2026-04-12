@@ -34,12 +34,17 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed --add-data "hyperswitch.ico;." --add-data "hyperswitch.png;." --add-data "chibi-cloud-watermark.png;." --icon hyperswitch.ico --name HyperSwitch hyperv_switch.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --add-data "hyperswitch.ico;." --add-data "hyperswitch.png;." --add-data "chibi-cloud-watermark.png;." --icon hyperswitch.ico --name HyperSwitchDBG hyperv_switch.py
+          python scripts/package_release.py --version ${{ github.ref_name }}
 
       - name: Upload Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
           name: HyperSwitch-windows
-          path: dist/HyperSwitch.exe
+          path: |
+            dist/HyperSwitch.exe
+            dist/HyperSwitchDBG.exe
+            out/*.zip
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -52,3 +57,5 @@ jobs:
             gh release create ${{ github.ref_name }} --generate-notes --latest
           }
           gh release upload ${{ github.ref_name }} dist/HyperSwitch.exe --clobber
+          gh release upload ${{ github.ref_name }} out/HyperSwitch-${{ github.ref_name }}-portable.zip --clobber
+          gh release upload ${{ github.ref_name }} dist/HyperSwitchDBG.exe --clobber
