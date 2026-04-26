@@ -4,9 +4,9 @@ HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS,
 
 ## Version 2.0
 
-HyperSwitch `2.0` is now being planned and actively started.
+HyperSwitch `2.0` is now in alpha.
 
-Current development estimate: `2.0.0-alpha.6`
+Current alpha release: `2.0.0-alpha`
 
 - Roadmap: `docs/ROADMAP-2.0.md`
 - Current foundation work now includes release polish, metadata/version cleanup, UI copy refinement, dedicated feature modules for Hyper-V, DSE, and VBS, plus separate platform and mitigation modules for the broader read-only security surface.
