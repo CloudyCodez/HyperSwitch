@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ class ReleaseAsset:
     name: str
     download_url: str
     size: int
+    digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -165,7 +167,41 @@ def download_release_package(release: ReleaseInfo, destination_root: str | None 
             if not chunk:
                 break
             handle.write(chunk)
+
+    verify_downloaded_asset(str(target), release.asset)
     return str(target)
+
+
+def verify_downloaded_asset(path: str, asset: ReleaseAsset) -> None:
+    expected = expected_sha256(asset)
+    if not expected:
+        return
+
+    actual = sha256_file(path)
+    if actual.lower() != expected.lower():
+        raise RuntimeError(
+            f"Downloaded asset hash mismatch for {asset.name}.\n"
+            f"Expected: {expected}\n"
+            f"Actual:   {actual}"
+        )
+
+
+def expected_sha256(asset: ReleaseAsset) -> str:
+    digest = asset.digest.strip()
+    if digest.lower().startswith("sha256:"):
+        return digest.split(":", 1)[1].strip()
+    return ""
+
+
+def sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def launch_update_installer(zip_path: str, install_dir: str, restart_relative_path: str, wait_pid: int) -> None:
@@ -258,9 +294,19 @@ def _portable_asset(assets: object) -> ReleaseAsset | None:
             continue
         lower_name = name.lower()
         if lower_name.startswith(f"{APP_NAME.lower()}-v") and lower_name.endswith("-portable.zip"):
-            return ReleaseAsset(name=name, download_url=url, size=int(item.get("size") or 0))
+            return ReleaseAsset(
+                name=name,
+                download_url=url,
+                size=int(item.get("size") or 0),
+                digest=str(item.get("digest") or "").strip(),
+            )
         if lower_name.endswith(".zip") and preferred is None:
-            preferred = ReleaseAsset(name=name, download_url=url, size=int(item.get("size") or 0))
+            preferred = ReleaseAsset(
+                name=name,
+                download_url=url,
+                size=int(item.get("size") or 0),
+                digest=str(item.get("digest") or "").strip(),
+            )
     return preferred
 
 

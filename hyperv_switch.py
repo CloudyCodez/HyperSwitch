@@ -414,6 +414,34 @@ def _state_history_entries(data: dict) -> list[dict[str, str]]:
     return entries
 
 
+def _cached_release_probe(data: dict | None = None) -> dict[str, str]:
+    source = data if isinstance(data, dict) else _load_tool_state()
+    raw = source.get("release_probe", {})
+    if not isinstance(raw, dict):
+        return {}
+
+    allowed = (
+        "checked_at",
+        "status",
+        "detail",
+        "current_version",
+        "latest_version",
+        "release_version",
+        "published_at",
+        "release_url",
+        "asset_name",
+        "asset_size",
+        "asset_digest",
+    )
+    cleaned: dict[str, str] = {}
+    for key in allowed:
+        value = raw.get(key)
+        if value is None:
+            continue
+        cleaned[key] = str(value).strip()
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # Feature state queries and setters
 # ---------------------------------------------------------------------------
@@ -536,12 +564,18 @@ def _bool_text(val: bool | None) -> str:
 def _write_debug_report() -> None:
     _clear_caches()
     lines: list[str] = []
+    release_probe = _cached_release_probe()
 
     lines.append(f"{APP_NAME} Debugger Report")
     lines.append("=" * 38)
     lines.append(f"Version: {APP_VERSION}")
     lines.append(f"Python: {sys.version}")
     lines.append(f"Executable: {sys.executable}")
+    if release_probe:
+        lines.append(f"ReleaseCheck.Status: {release_probe.get('status', 'unknown')}")
+        lines.append(f"ReleaseCheck.CheckedAt: {release_probe.get('checked_at', 'unknown')}")
+        lines.append(f"ReleaseCheck.LatestVersion: {release_probe.get('latest_version', 'unknown')}")
+        lines.append(f"ReleaseCheck.Asset: {release_probe.get('asset_name', 'unknown')}")
     lines.append("")
 
     # Hyper-V
@@ -973,12 +1007,55 @@ def _recent_support_bundle_paths(limit: int = 12) -> list[str]:
         return []
 
 
+def _path_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return 0
+
+
+def _format_bytes(byte_count: int) -> str:
+    if byte_count <= 0:
+        return "0 B"
+    value = float(byte_count)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{int(byte_count)} B"
+
+
 def _format_mtime(path: str) -> str:
     try:
         stamp = datetime.datetime.fromtimestamp(os.path.getmtime(path))
         return stamp.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "unknown time"
+
+
+def _quote_command_arg(value: str) -> str:
+    return '"' + value.replace('"', '\\"') + '"'
+
+
+def _backup_artifact_kind(path: str) -> str:
+    lower_path = path.lower()
+    if lower_path.endswith(".bcd"):
+        return "BCD store backup"
+    if lower_path.endswith(".reg"):
+        return "Registry export"
+    return "File artifact"
+
+
+def _backup_restore_command(path: str) -> str:
+    quoted = _quote_command_arg(path)
+    lower_path = path.lower()
+    if lower_path.endswith(".bcd"):
+        return f"bcdedit /import {quoted}"
+    if lower_path.endswith(".reg"):
+        return f"reg import {quoted}"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2524,6 +2601,11 @@ class App(tk.Tk):
         if self._open_path_in_explorer(path):
             self._append_log(f"[SUPPORT] Opened {path}")
 
+    def _open_releases_page(self) -> None:
+        url = _update.release_page_url()
+        if self._open_path_in_explorer(url):
+            self._append_log(f"[UPDATE] Opened releases page  {url}")
+
     def _remember_dismissed_update(self, version: str | None) -> None:
         if version:
             if self._tool_state.get("dismissed_update_version") != version:
@@ -2534,6 +2616,57 @@ class App(tk.Tk):
         if "dismissed_update_version" in self._tool_state:
             self._tool_state.pop("dismissed_update_version", None)
             self._persist_tool_state()
+
+    def _store_update_probe(self, probe: _update.UpdateProbe) -> None:
+        release = probe.release
+        payload = {
+            "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "status": probe.status,
+            "detail": probe.detail,
+            "current_version": probe.current_version,
+            "latest_version": probe.latest_version or "",
+            "release_version": release.version if release else "",
+            "published_at": release.published_at if release else "",
+            "release_url": release.html_url if release else "",
+            "asset_name": release.asset.name if release else "",
+            "asset_size": str(release.asset.size) if release else "",
+            "asset_digest": _update.expected_sha256(release.asset) if release else "",
+        }
+        self._tool_state["release_probe"] = payload
+        self._persist_tool_state()
+
+    def _current_update_snapshot(self) -> dict[str, str]:
+        return _cached_release_probe(self._tool_state)
+
+    def _build_update_summary(self) -> str:
+        snapshot = self._current_update_snapshot()
+        if not snapshot:
+            return "GitHub release status: no cached release check yet."
+
+        status = snapshot.get("status", "unknown") or "unknown"
+        checked_at = snapshot.get("checked_at", "unknown") or "unknown"
+        current_version = snapshot.get("current_version", APP_VERSION) or APP_VERSION
+        latest_version = snapshot.get("latest_version", "") or "unknown"
+        release_version = snapshot.get("release_version", "") or latest_version
+        detail = snapshot.get("detail", "") or "No detail."
+        published_at = snapshot.get("published_at", "") or "unknown"
+        asset_name = snapshot.get("asset_name", "") or "unknown"
+        asset_size = snapshot.get("asset_size", "")
+        asset_digest = snapshot.get("asset_digest", "")
+        asset_size_text = _format_bytes(int(asset_size)) if asset_size.isdigit() else "unknown"
+
+        lines = [
+            f"GitHub release status: {status}",
+            f"Checked at: {checked_at}",
+            f"Current build: {current_version}",
+            f"Latest release: {release_version}",
+            f"Published: {published_at}",
+            f"Package: {asset_name} ({asset_size_text})",
+        ]
+        if asset_digest:
+            lines.append(f"SHA-256: {asset_digest}")
+        lines.append(f"Detail: {detail}")
+        return "\n".join(lines)
 
     def _check_for_updates_silently(self) -> None:
         self._check_for_updates(manual=False)
@@ -2574,6 +2707,7 @@ class App(tk.Tk):
             def apply() -> None:
                 self._update_check_worker = None
                 self._latest_update_probe = probe
+                self._store_update_probe(probe)
                 self._handle_update_probe(probe, manual)
 
             self.after(0, apply)
@@ -2741,10 +2875,172 @@ class App(tk.Tk):
         )
         self.after(250, self.destroy)
 
+    def _build_backup_artifact_summary(self, path: str) -> str:
+        lines = [
+            f"Type: {_backup_artifact_kind(path)}",
+            f"Modified: {_format_mtime(path)}",
+            f"Size: {_format_bytes(_path_size(path))}",
+            f"Path: {path}",
+        ]
+        restore_command = _backup_restore_command(path)
+        if restore_command:
+            lines.append(f"Restore command: {restore_command}")
+        if path.lower().endswith(".bcd"):
+            lines.append("Use this to restore a previous boot configuration store.")
+        elif path.lower().endswith(".reg"):
+            lines.append("Use this to re-import previously exported HyperSwitch registry settings.")
+        return "\n".join(lines)
+
+    def _build_support_artifact_summary(self, path: str) -> str:
+        return "\n".join(
+            [
+                "Type: Support bundle",
+                f"Modified: {_format_mtime(path)}",
+                f"Size: {_format_bytes(_path_size(path))}",
+                f"Path: {path}",
+                "Use this when handing the machine off or attaching diagnostics to a report.",
+            ]
+        )
+
+    def _copy_restore_command(self, path: str) -> None:
+        if not path:
+            messagebox.showinfo(
+                "No backup selected",
+                "Select a backup artifact first.",
+                parent=self,
+            )
+            return
+
+        command = _backup_restore_command(path)
+        if not command:
+            messagebox.showinfo(
+                "No restore command",
+                "HyperSwitch does not have a restore command for the selected artifact.",
+                parent=self,
+            )
+            return
+
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(command)
+            self.update_idletasks()
+            self._append_log(f"[RECOVERY] Copied restore command  {command}")
+            messagebox.showinfo(
+                "Restore command copied",
+                "HyperSwitch copied the manual restore command to the clipboard.",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Clipboard error",
+                f"HyperSwitch could not copy the restore command.\n\n{exc}",
+                parent=self,
+            )
+
+    def _apply_backup_artifact(self, path: str) -> None:
+        if not path:
+            messagebox.showinfo(
+                "No backup selected",
+                "Select a backup artifact first.",
+                parent=self,
+            )
+            return
+
+        if not os.path.isfile(path):
+            messagebox.showerror(
+                "Backup not found",
+                f"HyperSwitch could not find the selected backup artifact.\n\n{path}",
+                parent=self,
+            )
+            return
+
+        lower_path = path.lower()
+        if lower_path.endswith(".bcd"):
+            proceed = self._ask_two_option_dialog(
+                "Restore BCD backup",
+                "Import the selected BCD backup now?\n\n"
+                "This restores the saved boot configuration store and usually requires a restart.\n\n"
+                f"{path}",
+                "IMPORT BCD",
+                "CANCEL",
+            )
+            if not proceed:
+                return
+            args = ["bcdedit", "/import", path]
+            success_title = "BCD backup imported"
+            success_message = (
+                "HyperSwitch imported the selected BCD backup.\n\n"
+                "A restart is recommended before you continue testing."
+            )
+            log_label = "BCD backup"
+        elif lower_path.endswith(".reg"):
+            proceed = self._ask_two_option_dialog(
+                "Import registry backup",
+                "Import the selected registry backup now?\n\n"
+                "This re-applies the exported registry values from the backup artifact.\n\n"
+                f"{path}",
+                "IMPORT REGISTRY",
+                "CANCEL",
+            )
+            if not proceed:
+                return
+            args = ["reg", "import", path]
+            success_title = "Registry backup imported"
+            success_message = (
+                "HyperSwitch imported the selected registry backup.\n\n"
+                "Status will refresh now. Some changes may still need a restart."
+            )
+            log_label = "Registry backup"
+        else:
+            messagebox.showinfo(
+                "Unsupported artifact",
+                "HyperSwitch can currently auto-apply BCD and .reg backup artifacts only.",
+                parent=self,
+            )
+            return
+
+        try:
+            proc = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except OSError as exc:
+            messagebox.showerror(
+                "Restore failed",
+                f"HyperSwitch could not start the restore command.\n\n{exc}",
+                parent=self,
+            )
+            return
+
+        output = (proc.stdout + proc.stderr).strip()
+        if proc.returncode != 0:
+            messagebox.showerror(
+                "Restore failed",
+                f"HyperSwitch could not apply the selected backup artifact.\n\n"
+                f"Command: {' '.join(args)}\n\n"
+                f"{output or 'The restore command failed.'}",
+                parent=self,
+            )
+            self._append_log(f"[RECOVERY] {log_label} restore failed  {path}")
+            return
+
+        self._append_log(f"[RECOVERY] Applied {log_label.lower()}  {path}")
+        self._refresh_all_async()
+        messagebox.showinfo(
+            success_title,
+            success_message + f"\n\n{path}",
+            parent=self,
+        )
+        if lower_path.endswith(".bcd"):
+            self._confirm_reboot()
+
     def _build_recovery_notes(self) -> str:
         recent_backups = _recent_backup_paths(5)
         recent_support = _recent_support_bundle_paths(5)
         pending = ", ".join(_pending_reboot_reasons()) or "none"
+        update_summary = self._build_update_summary().splitlines()
 
         lines = [
             f"{APP_NAME} Recovery Notes",
@@ -2757,8 +3053,18 @@ class App(tk.Tk):
             f"Backup folder: {_backup_dir()}",
             f"Support folder: {_support_bundle_dir()}",
             "",
-            "Recent backups:",
+            "Release state:",
         ]
+
+        for line in update_summary:
+            lines.append(f"- {line}")
+
+        lines.extend(
+            [
+                "",
+            "Recent backups:",
+            ]
+        )
 
         if recent_backups:
             for path in recent_backups:
@@ -2783,6 +3089,9 @@ class App(tk.Tk):
         cpuvirt_state, cpuvirt_source = cpu_virt_status()
         cred_runtime, cred_configured = credential_guard_status()
         hello_allowed, hello_source = windows_hello_status()
+        release_snapshot = self._current_update_snapshot()
+        release_status = release_snapshot.get("status", "unknown") or "unknown"
+        release_version = release_snapshot.get("release_version", "") or release_snapshot.get("latest_version", "") or "unknown"
 
         lines = [
             f"{APP_NAME} {APP_VERSION}",
@@ -2798,6 +3107,7 @@ class App(tk.Tk):
             f"Secure Boot: {_bool_text(_secure_boot_enabled())}",
             f"BitLocker system drive: {_bool_text(_bitlocker_protection_on())}",
             f"Windows Hello provisioning: {_bool_text(hello_allowed)} ({hello_source or 'no source'})",
+            f"GitHub release status: {release_status} ({release_version})",
         ]
         return "\n".join(lines)
 
@@ -2844,6 +3154,7 @@ class App(tk.Tk):
             _write_debug_report()
             summary = self._build_operator_summary()
             recovery_notes = self._build_recovery_notes()
+            update_summary = self._build_update_summary()
             bundle_dir = _support_bundle_dir()
             bundle_name = f"HyperSwitch-support-{_timestamp_slug()}.zip"
             bundle_path = os.path.join(bundle_dir, bundle_name)
@@ -2852,6 +3163,8 @@ class App(tk.Tk):
                 f"Version: {APP_VERSION}",
                 "",
                 summary,
+                "",
+                update_summary,
                 "",
                 f"State file: {_state_file_path()}",
                 f"Debug report: {_debug_report_path()}",
@@ -2862,6 +3175,7 @@ class App(tk.Tk):
             with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("summary.txt", summary + "\n")
                 archive.writestr("recovery.txt", recovery_notes + "\n")
+                archive.writestr("update.txt", update_summary + "\n")
                 archive.writestr("manifest.txt", "\n".join(manifest_lines) + "\n")
                 activity_lines = [
                     f"{entry.get('when', '')}  {entry.get('text', '')}".rstrip()
@@ -3022,6 +3336,50 @@ class App(tk.Tk):
         else:
             support_list.insert("end", "No support bundles found yet.")
 
+        details = tk.Text(
+            shell,
+            height=8,
+            bg=PANEL_ALT,
+            fg=WHITE,
+            font=MONO_SM,
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=8,
+            insertbackground=WHITE,
+        )
+        details.pack(fill="x", pady=(12, 0))
+
+        current_focus = {"kind": "backup" if backup_paths else "support"}
+
+        def selected_path(paths: list[str], listbox: tk.Listbox) -> str | None:
+            if not paths:
+                return None
+            selection = listbox.curselection()
+            index = selection[0] if selection else 0
+            if index < 0 or index >= len(paths):
+                return None
+            return paths[index]
+
+        def refresh_details() -> None:
+            if current_focus["kind"] == "support":
+                path = selected_path(support_paths, support_list)
+                if path:
+                    text = self._build_support_artifact_summary(path)
+                else:
+                    text = "Select a support bundle to view details."
+            else:
+                path = selected_path(backup_paths, backup_list)
+                if path:
+                    text = self._build_backup_artifact_summary(path)
+                else:
+                    text = "Select a backup artifact to view details."
+
+            details.config(state="normal")
+            details.delete("1.0", "end")
+            details.insert("1.0", text)
+            details.config(state="disabled")
+
         def open_selected(paths: list[str], listbox: tk.Listbox, label: str) -> None:
             if not paths:
                 messagebox.showinfo(
@@ -3036,11 +3394,23 @@ class App(tk.Tk):
             if self._open_path_in_explorer(target):
                 self._append_log(f"[RECOVERY] Opened {label.lower()}  {target}")
 
-        button_row = tk.Frame(shell, bg=BG)
-        button_row.pack(fill="x", pady=(12, 0))
+        def on_backup_select(_event=None) -> None:
+            current_focus["kind"] = "backup"
+            refresh_details()
+
+        def on_support_select(_event=None) -> None:
+            current_focus["kind"] = "support"
+            refresh_details()
+
+        backup_list.bind("<<ListboxSelect>>", on_backup_select)
+        support_list.bind("<<ListboxSelect>>", on_support_select)
+        refresh_details()
+
+        button_row_top = tk.Frame(shell, bg=BG)
+        button_row_top.pack(fill="x", pady=(12, 0))
 
         tk.Button(
-            button_row,
+            button_row_top,
             text="OPEN BACKUP",
             command=lambda: open_selected(backup_paths, backup_list, "Backup"),
             font=("Consolas", 9, "bold"),
@@ -3056,7 +3426,39 @@ class App(tk.Tk):
         ).pack(side="left")
 
         tk.Button(
-            button_row,
+            button_row_top,
+            text="APPLY BACKUP",
+            command=lambda: self._apply_backup_artifact(selected_path(backup_paths, backup_list) or ""),
+            font=("Consolas", 9, "bold"),
+            fg=GREEN,
+            bg="#062118",
+            activeforeground=GREEN,
+            activebackground="#0a3023",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row_top,
+            text="COPY RESTORE CMD",
+            command=lambda: self._copy_restore_command(selected_path(backup_paths, backup_list) or ""),
+            font=("Consolas", 9, "bold"),
+            fg=ACCENT,
+            bg="#102123",
+            activeforeground=ACCENT,
+            activebackground="#173136",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row_top,
             text="OPEN SUPPORT",
             command=lambda: open_selected(support_paths, support_list, "Support bundle"),
             font=("Consolas", 9, "bold"),
@@ -3071,8 +3473,11 @@ class App(tk.Tk):
             cursor="hand2",
         ).pack(side="left", padx=(10, 0))
 
+        button_row_bottom = tk.Frame(shell, bg=BG)
+        button_row_bottom.pack(fill="x", pady=(10, 0))
+
         tk.Button(
-            button_row,
+            button_row_bottom,
             text="COPY RECOVERY NOTES",
             command=self._copy_recovery_notes,
             font=("Consolas", 9, "bold"),
@@ -3085,10 +3490,10 @@ class App(tk.Tk):
             padx=12,
             pady=6,
             cursor="hand2",
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left")
 
         tk.Button(
-            button_row,
+            button_row_bottom,
             text="OPEN BACKUP FOLDER",
             command=self._open_backup_folder,
             font=("Consolas", 9, "bold"),
@@ -3104,7 +3509,39 @@ class App(tk.Tk):
         ).pack(side="left", padx=(10, 0))
 
         tk.Button(
-            button_row,
+            button_row_bottom,
+            text="OPEN SUPPORT FOLDER",
+            command=self._open_support_folder,
+            font=("Consolas", 9, "bold"),
+            fg=WHITE,
+            bg="#16202c",
+            activeforeground=WHITE,
+            activebackground="#1d2c3d",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row_bottom,
+            text="OPEN RELEASES",
+            command=self._open_releases_page,
+            font=("Consolas", 9, "bold"),
+            fg=BLUE,
+            bg="#0f1e2c",
+            activeforeground=BLUE,
+            activebackground="#182a3b",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row_bottom,
             text="CLOSE",
             command=dialog.destroy,
             font=("Consolas", 9, "bold"),
@@ -3149,7 +3586,7 @@ class App(tk.Tk):
 
         summary = tk.Text(
             shell,
-            height=4,
+            height=9,
             bg=PANEL_ALT,
             fg=WHITE,
             font=MONO_SM,
@@ -3159,7 +3596,7 @@ class App(tk.Tk):
             pady=8,
             insertbackground=WHITE,
         )
-        summary.insert("1.0", self._build_operator_summary())
+        summary.insert("1.0", self._build_operator_summary() + "\n\n" + self._build_update_summary())
         summary.config(state="disabled")
         summary.pack(fill="x")
 
@@ -3220,6 +3657,22 @@ class App(tk.Tk):
             pady=6,
             cursor="hand2",
         ).pack(side="left")
+
+        tk.Button(
+            button_row,
+            text="OPEN RELEASES",
+            command=self._open_releases_page,
+            font=("Consolas", 9, "bold"),
+            fg=BLUE,
+            bg="#0f1e2c",
+            activeforeground=BLUE,
+            activebackground="#182a3b",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
 
         tk.Button(
             button_row,
