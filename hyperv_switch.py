@@ -10,6 +10,8 @@ import tkinter as tk
 import zipfile
 from tkinter import messagebox
 
+import hyperswitch.update as _update
+
 from hyperswitch.bcd import (
     all_entries as _bcdedit_all_entries,
     clear_bcd_cache,
@@ -103,6 +105,7 @@ from hyperswitch.runtime import (
     app_storage_dir as _app_storage_dir,
     backup_dir as _backup_dir,
     debug_report_path as _debug_report_path,
+    is_frozen as _is_frozen,
     is_debug_mode as _is_debug_mode,
     resource_path as _resource_path,
     state_file_path as _state_file_path,
@@ -970,6 +973,14 @@ def _recent_support_bundle_paths(limit: int = 12) -> list[str]:
         return []
 
 
+def _format_mtime(path: str) -> str:
+    try:
+        stamp = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+        return stamp.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "unknown time"
+
+
 # ---------------------------------------------------------------------------
 # Reboot helper
 # ---------------------------------------------------------------------------
@@ -1031,6 +1042,9 @@ class App(tk.Tk):
         self._refresh_pending = False
         self._advanced_refresh_worker = None
         self._advanced_refresh_pending = False
+        self._update_check_worker = None
+        self._update_download_worker = None
+        self._latest_update_probe = None
         self._last_vbs = None
         self._last_hyperv_feature = None
         self._last_dse_partial = []
@@ -1039,6 +1053,8 @@ class App(tk.Tk):
         self._record_activity("Session started.")
         self._append_log("[SESSION] Ready.")
         self._refresh_all_async()
+        if _is_frozen():
+            self.after(1800, self._check_for_updates_silently)
 
     # ------------------------------------------------------------------
     # Dialogs
@@ -1301,6 +1317,36 @@ class App(tk.Tk):
             font=("Consolas", 10, "italic"),
             fg=ROSE, bg=BG,
         ).pack(side="left")
+
+        tk.Button(
+            footer_right,
+            text="CHECK UPDATES",
+            font=("Consolas", 9, "bold"),
+            fg=BLUE, bg="#0f1e2c",
+            activeforeground=BLUE,
+            activebackground="#182a3b",
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#36506b",
+            padx=10, pady=3,
+            command=self._check_for_updates,
+        ).pack(side="right", padx=(0, 10))
+
+        tk.Button(
+            footer_right,
+            text="RECOVERY",
+            font=("Consolas", 9, "bold"),
+            fg=AMBER, bg="#241900",
+            activeforeground=AMBER,
+            activebackground="#3a2a00",
+            relief="flat", bd=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground="#6e5600",
+            padx=10, pady=3,
+            command=self._show_recovery_center,
+        ).pack(side="right", padx=(0, 10))
 
         tk.Button(
             footer_right,
@@ -2478,6 +2524,258 @@ class App(tk.Tk):
         if self._open_path_in_explorer(path):
             self._append_log(f"[SUPPORT] Opened {path}")
 
+    def _remember_dismissed_update(self, version: str | None) -> None:
+        if version:
+            if self._tool_state.get("dismissed_update_version") != version:
+                self._tool_state["dismissed_update_version"] = version
+                self._persist_tool_state()
+            return
+
+        if "dismissed_update_version" in self._tool_state:
+            self._tool_state.pop("dismissed_update_version", None)
+            self._persist_tool_state()
+
+    def _check_for_updates_silently(self) -> None:
+        self._check_for_updates(manual=False)
+
+    def _check_for_updates(self, manual: bool = True) -> None:
+        if self._update_download_worker and self._update_download_worker.is_alive():
+            if manual:
+                messagebox.showinfo(
+                    "Update in progress",
+                    "HyperSwitch is already downloading or applying an update.",
+                    parent=self,
+                )
+            return
+
+        if self._update_check_worker and self._update_check_worker.is_alive():
+            if manual:
+                messagebox.showinfo(
+                    "Already checking",
+                    "HyperSwitch is already checking GitHub releases.",
+                    parent=self,
+                )
+            return
+
+        if manual:
+            self._append_log("[UPDATE] Checking GitHub releases...", persist=False)
+
+        def worker() -> None:
+            try:
+                probe = _update.check_for_updates(APP_VERSION)
+            except Exception as exc:
+                probe = _update.UpdateProbe(
+                    status="error",
+                    current_version=APP_VERSION,
+                    latest_version=None,
+                    detail=str(exc),
+                )
+
+            def apply() -> None:
+                self._update_check_worker = None
+                self._latest_update_probe = probe
+                self._handle_update_probe(probe, manual)
+
+            self.after(0, apply)
+
+        self._update_check_worker = threading.Thread(target=worker, daemon=True)
+        self._update_check_worker.start()
+
+    def _handle_update_probe(self, probe: _update.UpdateProbe, manual: bool) -> None:
+        if probe.status == "error":
+            self._append_log(f"[UPDATE] GitHub release check failed  {probe.detail}", persist=False)
+            if manual:
+                messagebox.showerror(
+                    "Update check failed",
+                    f"HyperSwitch could not check GitHub releases.\n\n{probe.detail}",
+                    parent=self,
+                )
+            return
+
+        release = probe.release
+        if probe.status == "available" and release:
+            if not manual:
+                dismissed_version = str(self._tool_state.get("dismissed_update_version", "")).strip()
+                if dismissed_version == release.version:
+                    return
+
+            published = release.published_at.replace("T", " ").replace("Z", " UTC") or "unknown"
+            prompt = (
+                f"A newer GitHub release is available.\n\n"
+                f"Current build: {probe.current_version}\n"
+                f"Latest release: {release.version}\n"
+                f"Published: {published}\n\n"
+                f"{APP_NAME} can download the portable package, replace the installed files,\n"
+                f"and relaunch itself."
+            )
+
+            if _is_frozen():
+                proceed = self._ask_two_option_dialog(
+                    "Update available",
+                    prompt + "\n\nApply it now?",
+                    "APPLY UPDATE",
+                    "LATER",
+                )
+                if proceed:
+                    self._remember_dismissed_update(None)
+                    self._download_and_apply_update(release)
+                else:
+                    self._remember_dismissed_update(release.version)
+                    if manual:
+                        self._append_log(f"[UPDATE] Deferred GitHub release {release.version}.")
+                return
+
+            open_release = self._ask_two_option_dialog(
+                "Update available",
+                prompt
+                + "\n\nAutomatic apply is available from the packaged executable build.\n"
+                + "Open the GitHub release page now?",
+                "OPEN RELEASE PAGE",
+                "NOT NOW",
+            )
+            if open_release and self._open_path_in_explorer(release.html_url or _update.release_page_url()):
+                self._append_log(f"[UPDATE] Opened release page for {release.version}.")
+            return
+
+        if probe.status == "current":
+            self._remember_dismissed_update(None)
+            if manual:
+                messagebox.showinfo(
+                    "Already current",
+                    f"{APP_NAME} is already on the latest GitHub release ({probe.current_version}).",
+                    parent=self,
+                )
+            return
+
+        if probe.status == "ahead":
+            if manual:
+                latest = probe.latest_version or "unknown"
+                messagebox.showinfo(
+                    "Build ahead of release",
+                    f"Current build: {probe.current_version}\n"
+                    f"Latest GitHub release: {latest}\n\n"
+                    f"This build is newer than the latest published release.",
+                    parent=self,
+                )
+            return
+
+        if manual:
+            messagebox.showinfo(
+                "No release package found",
+                probe.detail,
+                parent=self,
+            )
+
+    def _download_and_apply_update(self, release: _update.ReleaseInfo) -> None:
+        if self._update_download_worker and self._update_download_worker.is_alive():
+            return
+
+        self._append_log(f"[UPDATE] Downloading GitHub release {release.version}...")
+
+        def worker() -> None:
+            try:
+                zip_path = _update.download_release_package(release)
+                install_dir, restart_relative = _update.install_target_for_executable(sys.executable)
+            except Exception as exc:
+                payload = {"error": str(exc)}
+            else:
+                payload = {
+                    "zip_path": zip_path,
+                    "install_dir": install_dir,
+                    "restart_relative": restart_relative,
+                }
+
+            def apply() -> None:
+                self._update_download_worker = None
+                error_text = payload.get("error")
+                if error_text:
+                    self._append_log(f"[UPDATE] Download failed  {error_text}")
+                    messagebox.showerror(
+                        "Update download failed",
+                        f"HyperSwitch could not download the GitHub release.\n\n{error_text}",
+                        parent=self,
+                    )
+                    return
+                self._finish_update_install(
+                    release,
+                    str(payload["zip_path"]),
+                    str(payload["install_dir"]),
+                    str(payload["restart_relative"]),
+                )
+
+            self.after(0, apply)
+
+        self._update_download_worker = threading.Thread(target=worker, daemon=True)
+        self._update_download_worker.start()
+
+    def _finish_update_install(
+        self,
+        release: _update.ReleaseInfo,
+        zip_path: str,
+        install_dir: str,
+        restart_relative: str,
+    ) -> None:
+        try:
+            _update.launch_update_installer(
+                zip_path,
+                install_dir,
+                restart_relative,
+                os.getpid(),
+            )
+        except Exception as exc:
+            self._append_log(f"[UPDATE] Launch failed  {exc}")
+            messagebox.showerror(
+                "Update install failed",
+                f"HyperSwitch downloaded the release but could not launch the installer.\n\n{exc}",
+                parent=self,
+            )
+            return
+
+        self._remember_dismissed_update(None)
+        self._append_log(f"[UPDATE] Applying GitHub release {release.version}.")
+        messagebox.showinfo(
+            "Installing update",
+            f"{APP_NAME} will close while the new release is copied into place.\n"
+            f"It will relaunch automatically when the update finishes.",
+            parent=self,
+        )
+        self.after(250, self.destroy)
+
+    def _build_recovery_notes(self) -> str:
+        recent_backups = _recent_backup_paths(5)
+        recent_support = _recent_support_bundle_paths(5)
+        pending = ", ".join(_pending_reboot_reasons()) or "none"
+
+        lines = [
+            f"{APP_NAME} Recovery Notes",
+            "",
+            "1. If a boot-setting change is still pending, restart once and re-check the machine before changing anything else.",
+            "2. If behavior became worse after testing, open the latest BCD backup and support bundle first so you know exactly what changed.",
+            "3. Use the support bundle when handing the machine off. It captures the current state, recent activity, and rollback artifacts together.",
+            "",
+            f"Pending reboot state: {pending}",
+            f"Backup folder: {_backup_dir()}",
+            f"Support folder: {_support_bundle_dir()}",
+            "",
+            "Recent backups:",
+        ]
+
+        if recent_backups:
+            for path in recent_backups:
+                lines.append(f"- {os.path.basename(path)}  |  {_format_mtime(path)}")
+        else:
+            lines.append("- none yet")
+
+        lines.append("")
+        lines.append("Recent support bundles:")
+        if recent_support:
+            for path in recent_support:
+                lines.append(f"- {os.path.basename(path)}  |  {_format_mtime(path)}")
+        else:
+            lines.append("- none yet")
+
+        return "\n".join(lines)
+
     def _build_operator_summary(self) -> str:
         runtime_hv, configured_hv = hyperv_status()
         hvci_runtime, hvci_configured = hvci_status()
@@ -2522,10 +2820,30 @@ class App(tk.Tk):
                 parent=self,
             )
 
+    def _copy_recovery_notes(self) -> None:
+        notes = self._build_recovery_notes()
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(notes)
+            self.update_idletasks()
+            self._append_log("[RECOVERY] Copied recovery notes to clipboard.")
+            messagebox.showinfo(
+                "Recovery notes copied",
+                "HyperSwitch copied the current recovery notes to the clipboard.",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Clipboard error",
+                f"HyperSwitch could not copy the recovery notes.\n\n{exc}",
+                parent=self,
+            )
+
     def _export_support_bundle(self) -> None:
         try:
             _write_debug_report()
             summary = self._build_operator_summary()
+            recovery_notes = self._build_recovery_notes()
             bundle_dir = _support_bundle_dir()
             bundle_name = f"HyperSwitch-support-{_timestamp_slug()}.zip"
             bundle_path = os.path.join(bundle_dir, bundle_name)
@@ -2543,6 +2861,7 @@ class App(tk.Tk):
 
             with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("summary.txt", summary + "\n")
+                archive.writestr("recovery.txt", recovery_notes + "\n")
                 archive.writestr("manifest.txt", "\n".join(manifest_lines) + "\n")
                 activity_lines = [
                     f"{entry.get('when', '')}  {entry.get('text', '')}".rstrip()
@@ -2583,6 +2902,222 @@ class App(tk.Tk):
                 f"HyperSwitch could not export the support bundle.\n\n{exc}",
                 parent=self,
             )
+
+    def _show_recovery_center(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(f"{APP_NAME} Recovery")
+        dialog.configure(bg=BG)
+        dialog.resizable(True, True)
+        dialog.minsize(760, 520)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        shell = tk.Frame(dialog, bg=BG, padx=18, pady=16)
+        shell.pack(fill="both", expand=True)
+
+        tk.Label(
+            shell,
+            text="Recovery Center",
+            font=MONO_HDR,
+            fg=WHITE,
+            bg=BG,
+        ).pack(anchor="w")
+
+        tk.Label(
+            shell,
+            text="Rollback visibility for recent backups, support exports, and next-step guidance.",
+            font=MONO_SM,
+            fg=MUTED,
+            bg=BG,
+        ).pack(anchor="w", pady=(4, 12))
+
+        notes = tk.Text(
+            shell,
+            height=12,
+            bg=PANEL_ALT,
+            fg=WHITE,
+            font=MONO_SM,
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=8,
+            insertbackground=WHITE,
+        )
+        notes.insert("1.0", self._build_recovery_notes())
+        notes.config(state="disabled")
+        notes.pack(fill="x")
+
+        lists = tk.Frame(shell, bg=BG)
+        lists.pack(fill="both", expand=True, pady=(12, 0))
+
+        backup_card = tk.Frame(
+            lists,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        backup_card.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        support_card = tk.Frame(
+            lists,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        support_card.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        tk.Label(
+            backup_card,
+            text="RECENT BACKUPS",
+            font=MONO_LG,
+            fg=WHITE,
+            bg=PANEL,
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        backup_list = tk.Listbox(
+            backup_card,
+            bg=PANEL_ALT,
+            fg=WHITE,
+            font=MONO_SM,
+            relief="flat",
+            selectbackground="#243246",
+            selectforeground=WHITE,
+            activestyle="none",
+        )
+        backup_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        backup_paths = _recent_backup_paths(20)
+        if backup_paths:
+            for path in backup_paths:
+                backup_list.insert("end", f"{_format_mtime(path)}  |  {os.path.basename(path)}")
+            backup_list.selection_set(0)
+        else:
+            backup_list.insert("end", "No backup artifacts found yet.")
+
+        tk.Label(
+            support_card,
+            text="RECENT SUPPORT BUNDLES",
+            font=MONO_LG,
+            fg=WHITE,
+            bg=PANEL,
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        support_list = tk.Listbox(
+            support_card,
+            bg=PANEL_ALT,
+            fg=WHITE,
+            font=MONO_SM,
+            relief="flat",
+            selectbackground="#243246",
+            selectforeground=WHITE,
+            activestyle="none",
+        )
+        support_list.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        support_paths = _recent_support_bundle_paths(20)
+        if support_paths:
+            for path in support_paths:
+                support_list.insert("end", f"{_format_mtime(path)}  |  {os.path.basename(path)}")
+            support_list.selection_set(0)
+        else:
+            support_list.insert("end", "No support bundles found yet.")
+
+        def open_selected(paths: list[str], listbox: tk.Listbox, label: str) -> None:
+            if not paths:
+                messagebox.showinfo(
+                    label,
+                    f"HyperSwitch has no recent {label.lower()} to open yet.",
+                    parent=dialog,
+                )
+                return
+            selection = listbox.curselection()
+            index = selection[0] if selection else 0
+            target = paths[index]
+            if self._open_path_in_explorer(target):
+                self._append_log(f"[RECOVERY] Opened {label.lower()}  {target}")
+
+        button_row = tk.Frame(shell, bg=BG)
+        button_row.pack(fill="x", pady=(12, 0))
+
+        tk.Button(
+            button_row,
+            text="OPEN BACKUP",
+            command=lambda: open_selected(backup_paths, backup_list, "Backup"),
+            font=("Consolas", 9, "bold"),
+            fg=BLUE,
+            bg="#101a28",
+            activeforeground=BLUE,
+            activebackground="#152235",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left")
+
+        tk.Button(
+            button_row,
+            text="OPEN SUPPORT",
+            command=lambda: open_selected(support_paths, support_list, "Support bundle"),
+            font=("Consolas", 9, "bold"),
+            fg=GREEN,
+            bg="#062118",
+            activeforeground=GREEN,
+            activebackground="#0a3023",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row,
+            text="COPY RECOVERY NOTES",
+            command=self._copy_recovery_notes,
+            font=("Consolas", 9, "bold"),
+            fg=ACCENT,
+            bg="#102123",
+            activeforeground=ACCENT,
+            activebackground="#173136",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row,
+            text="OPEN BACKUP FOLDER",
+            command=self._open_backup_folder,
+            font=("Consolas", 9, "bold"),
+            fg=WHITE,
+            bg="#16202c",
+            activeforeground=WHITE,
+            activebackground="#1d2c3d",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row,
+            text="CLOSE",
+            command=dialog.destroy,
+            font=("Consolas", 9, "bold"),
+            fg=WHITE,
+            bg="#1b2633",
+            activeforeground=WHITE,
+            activebackground="#243246",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="right")
 
     def _show_activity_center(self) -> None:
         dialog = tk.Toplevel(self)
@@ -2672,6 +3207,22 @@ class App(tk.Tk):
 
         tk.Button(
             button_row,
+            text="CHECK UPDATES",
+            command=self._check_for_updates,
+            font=("Consolas", 9, "bold"),
+            fg=BLUE,
+            bg="#0f1e2c",
+            activeforeground=BLUE,
+            activebackground="#182a3b",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left")
+
+        tk.Button(
+            button_row,
             text="OPEN SUPPORT",
             command=self._open_support_folder,
             font=("Consolas", 9, "bold"),
@@ -2684,7 +3235,7 @@ class App(tk.Tk):
             padx=12,
             pady=6,
             cursor="hand2",
-        ).pack(side="left")
+        ).pack(side="left", padx=(10, 0))
 
         tk.Button(
             button_row,
