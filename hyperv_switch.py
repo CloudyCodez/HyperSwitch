@@ -12,23 +12,43 @@ from hyperswitch.bcd import (
     all_entries as _bcdedit_all_entries,
     clear_bcd_cache,
     current_entry as _bcdedit_current_entry,
-    export_backup as _export_bcd_backup,
-    format_bcdedit_failure as _format_bcdedit_failure_raw,
     read_key_value as _bcd_key_value,
     read_value as _read_bcd_value,
     run_bcdedit as _bcdedit,
-    set_boot_value as _bcdedit_set_boot_value_raw,
     status_error_title as _status_error_title,
+)
+from hyperswitch.features import (
+    HELLO_CSP_ROOT as _HELLO_CSP_ROOT,
+    HELLO_GPO_PATH as _HELLO_GPO_PATH,
+    HELLO_GPO_VALUE as _HELLO_GPO_VALUE,
+    HVCI_PATH_LEGACY as _HVCI_PATH_LEGACY,
+    HYPERV_PLATFORM_FEATURES as _HYPERV_PLATFORM_FEATURES,
+    KSHADOW_PATH as _KSHADOW_PATH,
+    VBS_POLICY_PATH as _VBS_POLICY_PATH,
+    VBS_REG_PATH as _VBS_REG_PATH,
+    VBS_REG_VALUE as _VBS_REG_VALUE,
+    VBS_STATUS_PATH as _VBS_STATUS_PATH,
+    VBS_STATUS_VALUE as _VBS_STATUS_VALUE,
+    dse_is_enforced,
+    dse_partial_enforcement as _dse_partial_enforcement,
+    dse_set_enforced as _dse_set_enforced_raw,
+    hyperv_driver_kind,
+    hyperv_feature_enabled,
+    hyperv_set as _hyperv_set_raw,
+    hyperv_status,
+    vbs_is_active,
+    vbs_set as _vbs_set_raw,
 )
 from hyperswitch.metadata import APP_NAME, APP_VERSION, DEBUG_APP_NAME, ROADMAP_TARGET
 from hyperswitch.queries import (
     bitlocker_protection_on as _bitlocker_protection_on,
     clear_query_caches,
+    credential_guard_configured as _credential_guard_configured_raw,
     credential_guard_status as _credential_guard_status,
     device_guard_has_value as _device_guard_has_value,
     dism_feature_state as _dism_feature_state,
     get_cpu_vendor as _get_cpu_vendor,
-    hello_csp_state as _hello_csp_state,
+    hello_csp_state as _hello_csp_state_raw,
     is_amd_fx_cpu as _is_amd_fx_cpu,
     parse_bool_text as _parse_bool_text,
     platform_value as _platform_value,
@@ -314,23 +334,6 @@ def _secure_boot_enabled() -> bool | None:
     return None
 
 
-def _bcdedit_set_boot_value(key: str, value: str) -> tuple[bool, str]:
-    return _bcdedit_set_boot_value_raw(key, value, _pending_reboot_reasons())
-
-
-def _format_bcdedit_failure(setting: str, value: str, raw_output: str) -> str:
-    return _format_bcdedit_failure_raw(setting, value, raw_output, _secure_boot_enabled())
-
-
-_HYPERV_PLATFORM_FEATURES = (
-    "Windows-Hypervisor-Platform",
-    "VirtualMachinePlatform",
-    "Microsoft-Hyper-V-All",
-    "Microsoft-Hyper-V",
-    "Microsoft-Hyper-V-Hypervisor",
-    "Microsoft-Hyper-V-Services",
-)
-
 def _timestamp_slug() -> str:
     import datetime
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -398,320 +401,68 @@ def _save_tool_state(data: dict) -> None:
 # Feature state queries and setters
 # ---------------------------------------------------------------------------
 
-def hyperv_status() -> tuple[bool | None, bool | None]:
-    runtime = None
-    configured = None
-
-    hv_running = _read_registry_dword(
-        None, r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Status", "HypervisorRunning")
-    if hv_running is not None:
-        runtime = hv_running == 1
-
-    if runtime is None:
-        hv_present = _read_registry_dword(
-            None, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization", "HypervisorPresent")
-        if hv_present is not None:
-            runtime = hv_present == 1
-
-    if runtime is None:
-        runtime = _powershell_bool(
-            "(Get-CimInstance -ClassName Win32_ComputerSystem "
-            "-EA SilentlyContinue).HypervisorPresent"
-        )
-
-    if runtime is None:
-        for svc in ("HvHost", "vmms", "HvSocket"):
-            try:
-                if _service_is_running(svc):
-                    runtime = True
-                    break
-            except Exception:
-                pass
-
-    if runtime is None:
-        wmic_hv = _wmic_property_value("computersystem", "HypervisorPresent")
-        if wmic_hv:
-            runtime = wmic_hv.upper() == "TRUE"
-
-    # Configured state.
-    val = _read_bcd_value("hypervisorlaunchtype")
-    if val is not None:
-        configured = (val == "auto")
-
-    if configured is None:
-        feature_state = hyperv_feature_enabled()
-        if feature_state is False:
-            configured = False
-
-    return runtime, configured
+def _clear_caches() -> None:
+    clear_query_caches()
+    clear_bcd_cache()
 
 
-def hyperv_driver_kind(
-    runtime: bool | None,
-    configured: bool | None,
-    vbs_active: bool | None,
-) -> str:
-    if runtime is None:
-        return "UNKNOWN"
-    if not runtime:
-        return "NONE"
-    if configured is True:
-        return "MICROSOFT"
-    if vbs_active is True:
-        return "MICROSOFT"
-    for svc in ("HvHost", "vmms", "vmcompute"):
-        if _service_is_running(svc):
-            return "MICROSOFT"
-    return "OTHER"
+def _collect_basic_snapshot() -> dict:
+    _prime_platform_cache()
+    _prime_device_guard_cache()
+    _prime_processor_cache()
+    dse = dse_is_enforced()
+    return {
+        "hyperv": hyperv_status(),
+        "hyperv_feature": hyperv_feature_enabled(),
+        "dse": dse,
+        "dse_partial": _dse_partial_enforcement() if dse is False else [],
+        "vbs": vbs_is_active(),
+        "cpuvirt": cpu_virt_status(),
+    }
 
 
-def hyperv_is_active() -> bool | None:
-    runtime, configured = hyperv_status()
-    if runtime is not None:
-        return runtime
-    if configured is not None:
-        return configured
-    return None
-
-
-def _dism_feature_state(feature_name: str) -> str | None:
-    if feature_name in _DISM_CACHE:
-        return _DISM_CACHE[feature_name]
-    try:
-        proc = subprocess.run(
-            [
-                "dism", "/online",
-                "/Get-FeatureInfo",
-                f"/FeatureName:{feature_name}",
-                "/English",
-            ],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if proc.returncode != 0:
-            _DISM_CACHE[feature_name] = None
-            return None
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("State"):
-                parts = line.split(":", 1)
-                if len(parts) == 2:
-                    result = parts[1].strip()
-                    _DISM_CACHE[feature_name] = result
-                    return result
-        _DISM_CACHE[feature_name] = None
-        return None
-    except Exception:
-        _DISM_CACHE[feature_name] = None
-        return None
-
-
-def hyperv_feature_enabled() -> bool | None:
-    features = _HYPERV_PLATFORM_FEATURES
-    saw_disabled = False
-    for feat in features:
-        state = _dism_feature_state(feat)
-        if state is None:
-            continue
-        if state.lower() == "enabled":
-            return True
-        if state.lower() == "disabled":
-            saw_disabled = True
-    if saw_disabled:
-        return False
-    return None
+def _collect_advanced_snapshot() -> dict:
+    _prime_platform_cache()
+    _prime_device_guard_cache()
+    _prime_processor_cache()
+    vendor = _get_cpu_vendor()
+    return {
+        "vendor": vendor,
+        "credguard": credential_guard_status(),
+        "bitlocker": _bitlocker_protection_on(),
+        "secureboot": _secure_boot_enabled(),
+        "hello": windows_hello_status(),
+        "meltdown": None if vendor == "amd" else meltdown_is_protected(),
+        "spectre": spectre_is_protected(),
+    }
 
 
 def hyperv_set(active: bool) -> tuple[bool, str]:
-    want = "auto" if active else "off"
-    ok_launch, msg_launch = _bcdedit_set_boot_value("hypervisorlaunchtype", want)
-    results = [f"hypervisorlaunchtype={want}({'OK' if ok_launch else 'FAIL'})"]
-    details: list[str] = []
-
-    if not ok_launch:
-        details.append(_format_bcdedit_failure("hypervisorlaunchtype", want, msg_launch))
-
-    message = "  |  ".join(results)
-    if details:
-        message += "\n\n" + "\n\n".join(details)
-    return ok_launch, message
-
-
-def _dse_partial_enforcement() -> list[str]:
-    active = []
-    ci_opts = _query_kernel_ci_options()
-
-    if ci_opts is not None:
-        if ci_opts & 0x004:
-            active.append("UMCI (user-mode code integrity)")
-        if ci_opts & 0x080:
-            active.append("HVCI (hypervisor-protected code integrity)")
-        if ci_opts & 0x800:
-            active.append("WHQL enforcement")
-
-    var_state = _read_registry_dword(
-        None,
-        r"SYSTEM\CurrentControlSet\Control\CI\Policy",
-        "VerifiedAndReputablePolicyState",
-    )
-    if var_state and var_state >= 1:
-        active.append("Smart App Control / Verified & Reputable policy")
-
-    emode = _read_registry_dword(
-        None,
-        r"SYSTEM\CurrentControlSet\Control\CI\Policy",
-        "EmodePolicyRequired",
-    )
-    if emode and emode >= 1:
-        active.append("Enhanced Mode signing policy")
-
-    import os as _os
-    for policy_file in (
-        r"C:\Windows\System32\CodeIntegrity\SiPolicy.p7b",
-        r"C:\Windows\System32\CodeIntegrity\driversipolicy.p7b",
-    ):
-        if _os.path.exists(policy_file):
-            active.append(f"CI policy file: {_os.path.basename(policy_file)}")
-
-    try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "Confirm-SecureBootUEFI"],
-            capture_output=True, text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if proc.stdout.strip().lower() == "true":
-            active.append("Secure Boot (firmware)")
-    except Exception:
-        pass
-
-    return active
-
-
-def _bcd_has_flag(output: str, flag: str) -> bool:
-    for line in output.splitlines():
-        stripped = line.strip().lower()
-        if stripped.startswith(flag.lower()):
-            parts = stripped.split(None, 1)
-            if len(parts) == 2 and parts[1].strip() == "yes":
-                return True
-    return False
-
-
-def _bcd_loadoptions_has(output: str, tokens: tuple[str, ...]) -> bool:
-    for line in output.splitlines():
-        stripped = line.strip()
-        if not stripped.lower().startswith("loadoptions"):
-            continue
-        parts = stripped.split(None, 1)
-        if len(parts) != 2:
-            continue
-        opts = parts[1].strip().lower()
-        for token in tokens:
-            if token in opts:
-                return True
-    return False
-
-
-def _ci_registry_disabled() -> bool:
-    if _read_registry_dword(None,
-            r"SYSTEM\CurrentControlSet\Control\CI\Config",
-            "DisableIntegrityChecks") == 1:
-        return True
-
-    if _read_registry_dword(None,
-            r"SYSTEM\CurrentControlSet\Control\CI\Protected",
-            "DisableIntegrityChecks") == 1:
-        return True
-
-    if _read_registry_dword(None,
-            r"SYSTEM\CurrentControlSet\Control\CI",
-            "DisableIntegrityChecks") == 1:
-        return True
-
-    if _read_registry_dword(None,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\kernel",
-            "DisableExceptionChainValidation") == 1:
-        return True
-
-    return False
-
-
-def _wmi_ci_enforced() -> bool | None:
-    val = _query_wmi_device_guard("CodeIntegrityPolicyEnforcementStatus")
-    if val is not None:
-        return val >= 1
-    return None
-
-
-def dse_is_enforced() -> bool | None:
-    any_read_succeeded = False
-
-    ci_opts = _query_kernel_ci_options()
-    if ci_opts is not None:
-        any_read_succeeded = True
-        if not (ci_opts & 0x01):
-            return False
-        if ci_opts & 0x02:
-            return False
-        if ci_opts & 0x200:
-            return False
-        return True
-
-    wmi = _wmi_ci_enforced()
-    if wmi is not None:
-        any_read_succeeded = True
-        return bool(wmi)
-
-    ok, bcd_current, _ = _bcdedit_current_entry()
-    if ok and bcd_current:
-        any_read_succeeded = True
-        if _bcd_has_flag(bcd_current, "testsigning"):
-            return False
-        if _bcd_has_flag(bcd_current, "nointegritychecks"):
-            return False
-        if _bcd_loadoptions_has(
-            bcd_current,
-            (
-                "testsigning",
-                "nointegritychecks",
-                "disable_integrity_checks",
-                "disableintegritychecks",
-                "ddisable_integrity_checks",
-                "ddisableintegritychecks",
-            ),
-        ):
-            return False
-
-    any_read_succeeded = True
-    if _ci_registry_disabled():
-        return False
-
-    if not any_read_succeeded:
-        return None
-    return True
+    return _hyperv_set_raw(active, _pending_reboot_reasons(), _secure_boot_enabled())
 
 
 def dse_set_enforced(enforced: bool) -> tuple[bool, str]:
-    val     = "no" if enforced else "yes"
-    results = []
-    details: list[str] = []
+    return _dse_set_enforced_raw(enforced, _pending_reboot_reasons(), _secure_boot_enabled())
 
-    ok1, msg1 = _bcdedit_set_boot_value("testsigning", val)
-    ok2, msg2 = _bcdedit_set_boot_value("nointegritychecks", val)
-    results.append(f"testsigning={val}({'OK' if ok1 else 'FAIL'})")
-    results.append(f"nointegritychecks={val}({'OK' if ok2 else 'FAIL'})")
-    if not ok1:
-        details.append(_format_bcdedit_failure("testsigning", val, msg1))
-    if not ok2:
-        details.append(_format_bcdedit_failure("nointegritychecks", val, msg2))
 
-    ok = ok1 and ok2
-    message = "  |  ".join(results)
-    if details:
-        message += "\n\n" + "\n\n".join(details)
-    return ok, message
+def vbs_set(active: bool) -> tuple[bool, str]:
+    return _vbs_set_raw(active, _pending_reboot_reasons(), _secure_boot_enabled())
+
+
+def _credential_guard_configured() -> bool | None:
+    return _credential_guard_configured_raw(_VBS_POLICY_PATH)
+
+
+def credential_guard_status() -> tuple[bool | None, bool | None]:
+    return _credential_guard_status(_VBS_POLICY_PATH)
+
+
+def _hello_csp_state() -> tuple[bool | None, str]:
+    return _hello_csp_state_raw(_HELLO_CSP_ROOT)
+
+
+def windows_hello_status() -> tuple[bool | None, str]:
+    return _windows_hello_status(_HELLO_GPO_PATH, _HELLO_GPO_VALUE, _HELLO_CSP_ROOT)
 
 
 _SPEC_REG_PATH = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
@@ -833,237 +584,6 @@ def spectre_is_protected() -> bool | None:
         pass
 
     return True
-
-
-# --- Virtualization Based Security -------------------------------------------
-# Main VBS signals come from Device Guard plus BCD.
-
-_VBS_REG_PATH = (
-    r"SYSTEM\CurrentControlSet\Control\DeviceGuard"
-)
-_VBS_REG_VALUE = "EnableVirtualizationBasedSecurity"
-_VBS_POLICY_PATH = r"SOFTWARE\Policies\Microsoft\Windows\DeviceGuard"
-_VBS_STATUS_PATH = (
-    r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Status"
-)
-_VBS_STATUS_VALUE = "VirtualizationBasedSecurityStatus"
-_KSHADOW_PATH = (
-    r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\KernelShadowStacks"
-)
-
-
-def _clear_caches() -> None:
-    clear_query_caches()
-    clear_bcd_cache()
-
-
-def _collect_basic_snapshot() -> dict:
-    _prime_platform_cache()
-    _prime_device_guard_cache()
-    _prime_processor_cache()
-    dse = dse_is_enforced()
-    return {
-        "hyperv": hyperv_status(),
-        "hyperv_feature": hyperv_feature_enabled(),
-        "dse": dse,
-        "dse_partial": _dse_partial_enforcement() if dse is False else [],
-        "vbs": vbs_is_active(),
-        "cpuvirt": cpu_virt_status(),
-    }
-
-
-def _collect_advanced_snapshot() -> dict:
-    _prime_platform_cache()
-    _prime_device_guard_cache()
-    _prime_processor_cache()
-    vendor = _get_cpu_vendor()
-    return {
-        "vendor": vendor,
-        "credguard": credential_guard_status(),
-        "bitlocker": _bitlocker_protection_on(),
-        "secureboot": _secure_boot_enabled(),
-        "hello": windows_hello_status(),
-        "meltdown": None if vendor == "amd" else meltdown_is_protected(),
-        "spectre": spectre_is_protected(),
-    }
-
-
-_HELLO_GPO_PATH = r"SOFTWARE\Policies\Microsoft\PassportForWork"
-_HELLO_GPO_VALUE = "Enabled"
-_HELLO_CSP_ROOT = r"SOFTWARE\Microsoft\Policies\PassportForWork"
-
-
-def credential_guard_status() -> tuple[bool | None, bool | None]:
-    return _credential_guard_status(_VBS_POLICY_PATH)
-
-
-def windows_hello_status() -> tuple[bool | None, str]:
-    return _windows_hello_status(_HELLO_GPO_PATH, _HELLO_GPO_VALUE, _HELLO_CSP_ROOT)
-
-
-def vbs_is_active() -> bool | None:
-    any_read_succeeded = False
-    strong_on = False
-    weak_on = False
-    explicit_off = False
-
-    wmi_running = _query_wmi_device_guard_list("SecurityServicesRunning")
-    if wmi_running is not None:
-        any_read_succeeded = True
-        if any(v > 0 for v in wmi_running):
-            strong_on = True
-        elif any(v == 0 for v in wmi_running):
-            explicit_off = True
-
-    wmi_cfg = _query_wmi_device_guard_list("SecurityServicesConfigured")
-    if wmi_cfg is not None:
-        any_read_succeeded = True
-        if any(v > 0 for v in wmi_cfg):
-            weak_on = True
-        elif any(v == 0 for v in wmi_cfg):
-            explicit_off = True
-
-    reg_status = _read_registry_dword(None, _VBS_STATUS_PATH, _VBS_STATUS_VALUE)
-    if reg_status is not None:
-        any_read_succeeded = True
-        if reg_status >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    reg_enabled = _read_registry_dword(None, _VBS_REG_PATH, _VBS_REG_VALUE)
-    if reg_enabled is not None:
-        any_read_succeeded = True
-        if reg_enabled >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    hvci_legacy = _read_registry_dword(None, _HVCI_PATH_LEGACY, "Enabled")
-    if hvci_legacy is not None:
-        any_read_succeeded = True
-        if hvci_legacy >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    kshadow_enabled = _read_registry_dword(None, _KSHADOW_PATH, "Enabled")
-    if kshadow_enabled is not None:
-        any_read_succeeded = True
-        if kshadow_enabled >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    policy_vbs = _read_registry_dword(None, _VBS_POLICY_PATH, "EnableVirtualizationBasedSecurity")
-    if policy_vbs is not None:
-        any_read_succeeded = True
-        if policy_vbs >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    lsa_cfg = _read_registry_dword(None, _VBS_POLICY_PATH, "LsaCfgFlags")
-    if lsa_cfg is not None:
-        any_read_succeeded = True
-        if lsa_cfg >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    try:
-        import winreg
-        for reg_path, reg_name in (
-            (_VBS_REG_PATH, _VBS_REG_VALUE),
-            (_VBS_STATUS_PATH, _VBS_STATUS_VALUE),
-        ):
-            try:
-                key = winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE,
-                    reg_path,
-                    0,
-                    winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
-                )
-                v, _ = winreg.QueryValueEx(key, reg_name)
-                winreg.CloseKey(key)
-                if isinstance(v, int):
-                    any_read_succeeded = True
-                    if v >= 1:
-                        strong_on = True
-                    else:
-                        explicit_off = True
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    val = _read_bcd_value("vsmlaunchtype")
-    if val is not None:
-        any_read_succeeded = True
-        if val == "auto":
-            strong_on = True
-        elif val == "off":
-            explicit_off = True
-
-    val = _powershell_value(
-        "[int](Get-ComputerInfo -EA SilentlyContinue)"
-        ".DeviceGuardVirtualizationBasedSecurityStatus"
-    )
-    if val and val.isdigit():
-        any_read_succeeded = True
-        if int(val) >= 1:
-            strong_on = True
-        else:
-            explicit_off = True
-
-    wmi_status = _query_wmi_device_guard("VirtualizationBasedSecurityStatus")
-    if wmi_status is not None:
-        any_read_succeeded = True
-        if wmi_status >= 1:
-            weak_on = True
-        else:
-            explicit_off = True
-
-    val = _powershell_value(
-        "(Get-WmiObject -Class Win32_DeviceGuard "
-        "-Namespace root\\Microsoft\\Windows\\DeviceGuard "
-        "-EA SilentlyContinue).VirtualizationBasedSecurityStatus"
-    )
-    if val and val.isdigit():
-        any_read_succeeded = True
-        if int(val) >= 1:
-            weak_on = True
-        else:
-            explicit_off = True
-
-    if strong_on:
-        return True
-    if weak_on and not explicit_off:
-        return True
-    if not any_read_succeeded:
-        return None
-    return False
-
-
-def vbs_set(active: bool) -> tuple[bool, str]:
-    results = []
-    details: list[str] = []
-
-    ok1, msg1 = _bcdedit_set_boot_value("vsmlaunchtype", "auto" if active else "off")
-    results.append(f"vsmlaunchtype={'auto' if active else 'off'}({'OK' if ok1 else 'FAIL'})")
-    if not ok1:
-        details.append(
-            _format_bcdedit_failure(
-                "vsmlaunchtype",
-                "auto" if active else "off",
-                msg1,
-            )
-        )
-
-    message = "  |  ".join(results)
-    if details:
-        message += "\n\n" + "\n\n".join(details)
-    return ok1, message
 
 
 # --- Core Isolation / Memory Integrity (HVCI) --------------------------------
@@ -2124,15 +1644,34 @@ class App(tk.Tk):
         header = tk.Frame(self, bg=BG)
         header.pack(fill="x", padx=20, pady=(10, 0))
 
+        brand = tk.Frame(header, bg=BG)
+        brand.pack(side="left", fill="x", expand=True)
+
+        brand_top = tk.Frame(brand, bg=BG)
+        brand_top.pack(anchor="w")
+
         tk.Label(
-            header, text="HYPERSWITCH",
+            brand_top, text="HYPERSWITCH",
             font=MONO_HDR, fg=WHITE, bg=BG,
         ).pack(side="left")
 
         tk.Label(
-            header, text="  hypervisor control center",
+            brand_top,
+            text=f"  {APP_VERSION.upper()}",
+            font=("Consolas", 8, "bold"),
+            fg=ACCENT,
+            bg="#0f2024",
+            padx=7,
+            pady=2,
+            highlightthickness=1,
+            highlightbackground="#24545a",
+        ).pack(side="left", padx=(10, 0), pady=(3, 0))
+
+        tk.Label(
+            brand,
+            text="operator console for Hyper-V, DSE, and VBS   |   BCD-first safety mode",
             font=MONO_SM, fg=MUTED, bg=BG,
-        ).pack(side="left", pady=(5, 0))
+        ).pack(anchor="w", pady=(4, 0))
 
         header_right = tk.Frame(header, bg=BG)
         header_right.pack(side="right")
@@ -2142,7 +1681,7 @@ class App(tk.Tk):
 
         tk.Label(
             mode_wrap,
-            text="SETTINGS",
+            text="VIEW",
             font=MONO_SM,
             fg=MUTED,
             bg=BG,
@@ -2230,12 +1769,24 @@ class App(tk.Tk):
 
         tk.Label(
             footer_left,
-            text="Changes apply after restart   |   F1 for help   |   F2 for info",
+            text="BCD changes land on the next restart   |   F1 help   |   F2 product notes",
             font=MONO_SM, fg=MUTED, bg=BG,
         ).pack(side="left", padx=(8, 0))
 
         sig = tk.Frame(footer_right, bg=BG)
         sig.pack(side="right")
+
+        tk.Label(
+            footer_right,
+            text=f"ROADMAP {ROADMAP_TARGET}",
+            font=("Consolas", 8, "bold"),
+            fg=ACCENT,
+            bg="#0f2024",
+            padx=7,
+            pady=2,
+            highlightthickness=1,
+            highlightbackground="#24545a",
+        ).pack(side="right", padx=(0, 12))
 
         tk.Label(
             sig,
@@ -2275,7 +1826,7 @@ class App(tk.Tk):
 
         tk.Button(
             self,
-            text="\u27f3   RESTART NOW",
+            text="RESTART TO APPLY",
             font=("Consolas", 10, "bold"),
             fg=AMBER, bg="#241900",
             activeforeground=AMBER,
@@ -3344,8 +2895,8 @@ class App(tk.Tk):
         if target_mode == "Advanced" and self._last_mode != "Advanced":
             proceed = messagebox.askyesno(
                 "Switch to Advanced mode",
-                "Advanced mode exposes the full status list.\n\n"
-                "Safety mode still limits writes to a small BCD edit allowlist.\n\n"
+                "Advanced mode opens the full diagnostic board.\n\n"
+                "Safety mode still limits writes to the BCD allowlist.\n\n"
                 "Open Advanced mode?",
                 parent=self,
             )
@@ -3363,14 +2914,17 @@ class App(tk.Tk):
 
         if basic_mode:
             hint = (
-                "BASIC MODE: BCD-only safety mode. Change one setting, restart, test, then switch it back manually if needed."
+                "BASIC MODE: safest path for live troubleshooting. Queue one BCD change, restart, validate the result, then switch it back manually when you are done."
             )
         else:
-            hint = "ADVANCED MODE: full status list is visible. Writes stay limited to the BCD allowlist."
+            hint = (
+                "ADVANCED MODE: exposes the full status surface for deeper checks. "
+                "Writes still stay limited to the BCD allowlist."
+            )
 
         pending = _pending_reboot_text()
         if pending:
-            hint += "   |   " + pending
+            hint += "   |   Restart state detected: " + pending
         self._mode_hint.config(text=hint)
 
         for row in self._basic_rows:
@@ -3415,30 +2969,34 @@ class App(tk.Tk):
         messagebox.showinfo(
             "Help",
             (
-                "HYPER-V SWITCH\n\n"
+                f"{APP_NAME}\n\n"
                 "Hyper-V\n"
-                "  Starts or stops the Windows hypervisor.\n"
+                "  Starts or stops the Windows hypervisor on the next restart.\n"
                 "  This toggle only changes hypervisorlaunchtype.\n"
                 "  bcdedit key: hypervisorlaunchtype\n\n"
                 "DSE -- Driver Signature Enforcement\n"
-                "  Controls whether Windows will load unsigned drivers.\n"
+                "  Controls whether Windows will enforce signed-driver loading.\n"
                 "  This toggle only changes testsigning and nointegritychecks.\n"
                 "  bcdedit keys: testsigning, nointegritychecks\n\n"
                 "VBS -- Virtualization Based Security\n"
-                "  Windows security features that run behind the hypervisor.\n"
+                "  Covers Windows security features that run behind the hypervisor.\n"
                 "  This toggle only changes vsmlaunchtype.\n"
                 "  bcdedit key: vsmlaunchtype\n\n"
                 "Mode\n"
-                "  Basic mode is the default and only shows the first four rows.\n"
-                "  It is meant for one change at a time.\n"
-                "  It also blocks boot edits while Windows has a pending reboot.\n"
-                "  Advanced mode shows the full status list, but non-BCD toggles\n"
-                "  are read-only in safety mode.\n\n"
+                "  Basic mode is the default operating path and is meant for\n"
+                "  one change at a time.\n"
+                "  It also blocks boot edits while Windows already has a\n"
+                "  pending restart state.\n"
+                "  Advanced mode shows the full status board, but non-BCD\n"
+                "  controls stay read-only in safety mode.\n\n"
                 "Safety Mode\n"
-                "  HyperSwitch only writes a small BCD allowlist on the current\n"
+                "  HyperSwitch only writes a short BCD allowlist on the current\n"
                 "  boot entry: hypervisorlaunchtype, testsigning,\n"
                 "  nointegritychecks, and vsmlaunchtype.\n\n"
-                "All changes are pending until you restart."
+                "Everything else is reported for visibility so you can see what\n"
+                "Windows is doing without letting the tool make broad policy\n"
+                "changes behind your back.\n\n"
+                "All applied changes stay pending until restart."
             ),
             parent=self,
         )
@@ -3460,18 +3018,17 @@ class App(tk.Tk):
             f"{APP_NAME} Info",
             f"{APP_NAME} {APP_VERSION}\n"
             f"Roadmap target: {ROADMAP_TARGET}\n\n"
-            "This is an open-source utility tool to help troubleshoot any errors "
-            "these settings may be causing you.\n\n"
-            "This utility is NOT meant to replace VBS, DSE, or any other methods "
-            "instructed by the HV Team.\n\n"
-            "This utility is not affiliated with the HV Team in any way.\n\n"
-            "Please dont bug them with any questions about this utility. <3\n\n"
-            "For all questions or concerns (including error and bug reports) please "
-            "direct them to Cloud. (.cjmxo on discord)\n\n"
-            "Thank you for all the testers that have gotten this tool as far as its "
-            "come, and thank you to all who contribute going forward!\n\n"
-            "Happy Gaming!\n\n"
-            "- Cloud",
+            "HyperSwitch is an independent troubleshooting utility for operators who "
+            "need fast visibility into Hyper-V, driver integrity, and VBS state on a "
+            "live Windows install.\n\n"
+            "The tool is intentionally conservative: writes stay limited to a short "
+            "BCD allowlist, while the broader security surface is shown read-only for "
+            "clarity and safety.\n\n"
+            "This project is not affiliated with the Hyper-V team or Microsoft "
+            "support channels.\n\n"
+            "Project direction, release notes, and support remain with Cloud. "
+            "Discord: .cjmxo\n\n"
+            "Thanks to everyone helping shape the 2.0 release.",
             parent=self,
         )
 
