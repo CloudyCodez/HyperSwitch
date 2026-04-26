@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import zipfile
 from tkinter import messagebox
 
 from hyperswitch.bcd import (
@@ -98,6 +99,7 @@ from hyperswitch.queries import (
     wmic_property_value as _wmic_property_value,
 )
 from hyperswitch.runtime import (
+    app_storage_dir as _app_storage_dir,
     backup_dir as _backup_dir,
     debug_report_path as _debug_report_path,
     is_debug_mode as _is_debug_mode,
@@ -461,6 +463,38 @@ def windows_hello_status() -> tuple[bool | None, str]:
 
 def _first_reason(reasons: list[str]) -> str:
     return reasons[0] if reasons else ""
+
+
+def _bcd_has_flag(output: str, flag: str) -> bool:
+    for line in output.splitlines():
+        stripped = line.strip().lower()
+        if stripped.startswith(flag.lower()):
+            parts = stripped.split(None, 1)
+            if len(parts) == 2 and parts[1].strip() == "yes":
+                return True
+    return False
+
+
+def _bcd_loadoptions_has(output: str, tokens: tuple[str, ...]) -> bool:
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("loadoptions"):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        options = parts[1].strip().lower()
+        for token in tokens:
+            if token in options:
+                return True
+    return False
+
+
+def _wmi_ci_enforced() -> bool | None:
+    value = _query_wmi_device_guard("CodeIntegrityPolicyEnforcementStatus")
+    if value is not None:
+        return value >= 1
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +916,27 @@ def _run_debug_gui() -> None:
         _write_debug_report()
 
 
+def _support_bundle_dir() -> str:
+    folder = os.path.join(_app_storage_dir(), "support")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def _recent_backup_paths(limit: int = 12) -> list[str]:
+    try:
+        root = _backup_dir()
+        entries = []
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            entries.append((os.path.getmtime(path), path))
+        entries.sort(reverse=True)
+        return [path for _, path in entries[:limit]]
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Reboot helper
 # ---------------------------------------------------------------------------
@@ -1205,6 +1260,51 @@ class App(tk.Tk):
             font=("Consolas", 10, "italic"),
             fg=ROSE, bg=BG,
         ).pack(side="left")
+
+        tk.Button(
+            footer_right,
+            text="OPEN BACKUPS",
+            font=("Consolas", 9, "bold"),
+            fg=BLUE, bg="#101a28",
+            activeforeground=BLUE,
+            activebackground="#152235",
+            relief="flat", bd=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground="#274766",
+            padx=10, pady=3,
+            command=self._open_backup_folder,
+        ).pack(side="right", padx=(0, 10))
+
+        tk.Button(
+            footer_right,
+            text="COPY SUMMARY",
+            font=("Consolas", 9, "bold"),
+            fg=ACCENT, bg="#102123",
+            activeforeground=ACCENT,
+            activebackground="#173136",
+            relief="flat", bd=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground="#24545a",
+            padx=10, pady=3,
+            command=self._copy_summary,
+        ).pack(side="right", padx=(0, 10))
+
+        tk.Button(
+            footer_right,
+            text="EXPORT SUPPORT",
+            font=("Consolas", 9, "bold"),
+            fg=GREEN, bg="#062118",
+            activeforeground=GREEN,
+            activebackground="#0a3023",
+            relief="flat", bd=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground="#0d5f46",
+            padx=10, pady=3,
+            command=self._export_support_bundle,
+        ).pack(side="right", padx=(0, 10))
 
         tk.Button(
             footer_right,
@@ -2286,6 +2386,117 @@ class App(tk.Tk):
         self._log.insert("end", text + "\n")
         self._log.see("end")
         self._log.config(state="disabled")
+
+    def _open_path_in_explorer(self, path: str) -> bool:
+        try:
+            os.startfile(path)
+            return True
+        except Exception as exc:
+            messagebox.showerror(
+                "Open path failed",
+                f"HyperSwitch could not open:\n{path}\n\n{exc}",
+                parent=self,
+            )
+            return False
+
+    def _open_backup_folder(self) -> None:
+        path = _backup_dir()
+        if self._open_path_in_explorer(path):
+            self._append_log(f"[BACKUPS] Opened {path}")
+
+    def _build_operator_summary(self) -> str:
+        runtime_hv, configured_hv = hyperv_status()
+        hvci_runtime, hvci_configured = hvci_status()
+        dma_runtime, dma_policy = dma_status()
+        cpuvirt_state, cpuvirt_source = cpu_virt_status()
+        cred_runtime, cred_configured = credential_guard_status()
+        hello_allowed, hello_source = windows_hello_status()
+
+        lines = [
+            f"{APP_NAME} {APP_VERSION}",
+            f"Mode: {self._mode_var.get()}",
+            f"Pending reboot: {', '.join(_pending_reboot_reasons()) or 'none'}",
+            f"Hyper-V runtime/configured: {_bool_text(runtime_hv)} / {_bool_text(configured_hv)}",
+            f"DSE enforced: {_bool_text(dse_is_enforced())}",
+            f"VBS active: {_bool_text(vbs_is_active())}",
+            f"HVCI runtime/configured: {_bool_text(hvci_runtime)} / {_bool_text(hvci_configured)}",
+            f"DMA runtime/policy: {_bool_text(dma_runtime)} / {_bool_text(dma_policy)}",
+            f"CPU virtualization: {_bool_text(cpuvirt_state)} ({cpuvirt_source})",
+            f"Credential Guard runtime/configured: {_bool_text(cred_runtime)} / {_bool_text(cred_configured)}",
+            f"Secure Boot: {_bool_text(_secure_boot_enabled())}",
+            f"BitLocker system drive: {_bool_text(_bitlocker_protection_on())}",
+            f"Windows Hello provisioning: {_bool_text(hello_allowed)} ({hello_source or 'no source'})",
+        ]
+        return "\n".join(lines)
+
+    def _copy_summary(self) -> None:
+        summary = self._build_operator_summary()
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(summary)
+            self.update_idletasks()
+            self._append_log("[SUMMARY] Copied operator summary to clipboard.")
+            messagebox.showinfo(
+                "Summary copied",
+                "HyperSwitch copied a quick operator summary to the clipboard.",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Clipboard error",
+                f"HyperSwitch could not copy the summary.\n\n{exc}",
+                parent=self,
+            )
+
+    def _export_support_bundle(self) -> None:
+        try:
+            _write_debug_report()
+            summary = self._build_operator_summary()
+            bundle_dir = _support_bundle_dir()
+            bundle_name = f"HyperSwitch-support-{_timestamp_slug()}.zip"
+            bundle_path = os.path.join(bundle_dir, bundle_name)
+            manifest_lines = [
+                f"{APP_NAME} Support Bundle",
+                f"Version: {APP_VERSION}",
+                "",
+                summary,
+                "",
+                f"State file: {_state_file_path()}",
+                f"Debug report: {_debug_report_path()}",
+                f"Backup folder: {_backup_dir()}",
+            ]
+
+            with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("summary.txt", summary + "\n")
+                archive.writestr("manifest.txt", "\n".join(manifest_lines) + "\n")
+
+                debug_path = _debug_report_path()
+                if os.path.exists(debug_path):
+                    archive.write(debug_path, arcname="debugger.txt")
+
+                state_path = _state_file_path()
+                if os.path.exists(state_path):
+                    archive.write(state_path, arcname="state.json")
+
+                for backup_path in _recent_backup_paths():
+                    arcname = os.path.join("backups", os.path.basename(backup_path))
+                    archive.write(backup_path, arcname=arcname)
+
+            self._append_log(f"[SUPPORT] Exported support bundle to {bundle_path}")
+            messagebox.showinfo(
+                "Support bundle ready",
+                "HyperSwitch exported a support bundle with the latest debug report,\n"
+                "current state summary, and recent rollback artifacts.\n\n"
+                f"{bundle_path}",
+                parent=self,
+            )
+        except Exception as exc:
+            self._append_log(f"[SUPPORT] Export failed  {exc}")
+            messagebox.showerror(
+                "Support bundle failed",
+                f"HyperSwitch could not export the support bundle.\n\n{exc}",
+                parent=self,
+            )
 
     def _on_mode_changed(self, _value=None) -> None:
         target_mode = self._mode_var.get()

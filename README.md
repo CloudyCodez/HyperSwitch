@@ -6,7 +6,7 @@ HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS,
 
 HyperSwitch `2.0` is now being planned and actively started.
 
-Current development estimate: `2.0.0-alpha.3`
+Current development estimate: `2.0.0-alpha.4`
 
 - Roadmap: `docs/ROADMAP-2.0.md`
 - Current foundation work now includes release polish, metadata/version cleanup, UI copy refinement, dedicated feature modules for Hyper-V, DSE, and VBS, plus separate platform and mitigation modules for the broader read-only security surface.
@@ -16,6 +16,8 @@ Current development estimate: `2.0.0-alpha.3`
 - Shows current virtualization and security state in a single desktop app
 - Offers safer Basic mode for common troubleshooting
 - Includes Advanced mode for deeper system changes
+- Exports an in-app support bundle with debug output, current state, and recent backup artifacts
+- Lets operators quickly copy a machine summary or open the rollback backup folder
 - Supports a debugger build that writes `debugger.txt` for issue reports
 - Packages into a portable Windows `.exe`
 
