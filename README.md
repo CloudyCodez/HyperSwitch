@@ -4,12 +4,13 @@ HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS,
 
 ## Version 2.0
 
-HyperSwitch `2.0` is now in alpha and continuing forward after the initial alpha tag.
+HyperSwitch `2.0` is now released.
 
-Current development version: `2.0.0-alpha.3`
+Current stable version: `2.0.0`
 
+- Release notes: `docs/RELEASE-NOTES-2.0.md`
 - Roadmap: `docs/ROADMAP-2.0.md`
-- Current foundation work now includes release polish, metadata/version cleanup, UI copy refinement, dedicated feature modules for Hyper-V, DSE, and VBS, plus separate platform and mitigation modules for the broader read-only security surface.
+- The 2.0 line adds a more modular core, stronger rollback/support tooling, grouped restore sets, release ZIP packaging, and a built-in GitHub updater.
 
 ## What It Does
 
@@ -63,7 +64,7 @@ This creates:
 
 The repo includes a GitHub Actions workflow at `.github/workflows/release.yml`.
 
-- Pushing a tag like `v1.0.2` builds one release ZIP bundle for GitHub Releases
+- Pushing a tag like `v2.0.0` builds one release ZIP bundle for GitHub Releases
 - The release zip keeps `HyperSwitch.exe` at the top level and tucks docs, source files, assets, and debug tools into subfolders
 - The workflow uploads the release zip as the build artifact
 - Tagged builds are published to GitHub Releases automatically

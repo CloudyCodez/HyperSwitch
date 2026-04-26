@@ -1428,7 +1428,7 @@ class App(tk.Tk):
 
         tk.Label(
             footer_right,
-            text=f"ROADMAP {ROADMAP_TARGET}",
+            text=f"VERSION {ROADMAP_TARGET}",
             font=("Consolas", 8, "bold"),
             fg=ACCENT,
             bg="#0f2024",
@@ -4191,7 +4191,7 @@ class App(tk.Tk):
         messagebox.showinfo(
             f"{APP_NAME} Info",
             f"{APP_NAME} {APP_VERSION}\n"
-            f"Roadmap target: {ROADMAP_TARGET}\n\n"
+            f"Release line: {ROADMAP_TARGET}\n\n"
             "HyperSwitch is an independent troubleshooting utility for operators who "
             "need fast visibility into Hyper-V, driver integrity, and VBS state on a "
             "live Windows install.\n\n"
@@ -4200,9 +4200,9 @@ class App(tk.Tk):
             "clarity and safety.\n\n"
             "This project is not affiliated with the Hyper-V team or Microsoft "
             "support channels.\n\n"
-            "Project direction, release notes, and support remain with Cloud. "
+            "Project notes, release packaging, and support remain with Cloud. "
             "Discord: .cjmxo\n\n"
-            "Thanks to everyone helping shape the 2.0 release.",
+            "Thanks to everyone who helped bring the 2.0 release together.",
             parent=self,
         )
 

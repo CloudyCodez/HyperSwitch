@@ -1,5 +1,11 @@
 # HyperSwitch Version 2.0 Roadmap
 
+## Status
+
+HyperSwitch `2.0.0` is now released.
+
+The roadmap below captures the direction and workstreams that shaped the 2.0 launch. It remains useful as product history and as context for future updates beyond the 2.0 line.
+
 ## Vision
 
 HyperSwitch 2.0 is the evolution of HyperSwitch from a useful single-purpose troubleshooting utility into a more polished, trustworthy, and maintainable Windows virtualization control center.
