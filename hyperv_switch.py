@@ -1,4 +1,5 @@
 import ctypes
+import datetime
 import json
 import os
 import re
@@ -391,6 +392,23 @@ def _save_tool_state(data: dict) -> None:
     path = _state_file_path()
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, sort_keys=True)
+
+
+def _state_history_entries(data: dict) -> list[dict[str, str]]:
+    history = data.get("history", [])
+    if not isinstance(history, list):
+        return []
+
+    entries: list[dict[str, str]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        when = str(item.get("when", "")).strip()
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        entries.append({"when": when, "text": text})
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +955,21 @@ def _recent_backup_paths(limit: int = 12) -> list[str]:
         return []
 
 
+def _recent_support_bundle_paths(limit: int = 12) -> list[str]:
+    try:
+        root = _support_bundle_dir()
+        entries = []
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            entries.append((os.path.getmtime(path), path))
+        entries.sort(reverse=True)
+        return [path for _, path in entries[:limit]]
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Reboot helper
 # ---------------------------------------------------------------------------
@@ -963,6 +996,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
 
+        self._tool_state = _load_tool_state()
         self.title(f"{APP_NAME} {APP_VERSION}")
         _apply_window_icon(self)
         self.configure(bg=BG)
@@ -984,8 +1018,12 @@ class App(tk.Tk):
         self.resizable(True, True)
         self.minsize(760, 560)
 
-        self._mode_var = tk.StringVar(value="Basic")
-        self._last_mode = "Basic"
+        saved_mode = self._tool_state.get("preferred_mode", "Basic")
+        if saved_mode not in ("Basic", "Advanced"):
+            saved_mode = "Basic"
+
+        self._mode_var = tk.StringVar(value=saved_mode)
+        self._last_mode = saved_mode
         self._mascot_photo = None
         self._build_ui()
         self._center(win_w, win_h)
@@ -997,6 +1035,9 @@ class App(tk.Tk):
         self._last_hyperv_feature = None
         self._last_dse_partial = []
         self._basic_change_pending = False
+        self._history_cache = _state_history_entries(self._tool_state)
+        self._record_activity("Session started.")
+        self._append_log("[SESSION] Ready.")
         self._refresh_all_async()
 
     # ------------------------------------------------------------------
@@ -1260,6 +1301,21 @@ class App(tk.Tk):
             font=("Consolas", 10, "italic"),
             fg=ROSE, bg=BG,
         ).pack(side="left")
+
+        tk.Button(
+            footer_right,
+            text="ACTIVITY",
+            font=("Consolas", 9, "bold"),
+            fg=WHITE, bg="#16202c",
+            activeforeground=WHITE,
+            activebackground="#1d2c3d",
+            relief="flat", bd=0,
+            cursor="hand2",
+            highlightthickness=1,
+            highlightbackground="#334155",
+            padx=10, pady=3,
+            command=self._show_activity_center,
+        ).pack(side="right", padx=(0, 10))
 
         tk.Button(
             footer_right,
@@ -2381,11 +2437,24 @@ class App(tk.Tk):
     # Log
     # ------------------------------------------------------------------
 
-    def _append_log(self, text: str) -> None:
+    def _persist_tool_state(self) -> None:
+        self._tool_state["preferred_mode"] = self._mode_var.get()
+        self._tool_state["history"] = list(self._history_cache[-80:])
+        _save_tool_state(self._tool_state)
+
+    def _record_activity(self, text: str) -> None:
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._history_cache.append({"when": stamp, "text": text})
+        self._history_cache = self._history_cache[-80:]
+        self._persist_tool_state()
+
+    def _append_log(self, text: str, persist: bool = True) -> None:
         self._log.config(state="normal")
         self._log.insert("end", text + "\n")
         self._log.see("end")
         self._log.config(state="disabled")
+        if persist:
+            self._record_activity(text)
 
     def _open_path_in_explorer(self, path: str) -> bool:
         try:
@@ -2403,6 +2472,11 @@ class App(tk.Tk):
         path = _backup_dir()
         if self._open_path_in_explorer(path):
             self._append_log(f"[BACKUPS] Opened {path}")
+
+    def _open_support_folder(self) -> None:
+        path = _support_bundle_dir()
+        if self._open_path_in_explorer(path):
+            self._append_log(f"[SUPPORT] Opened {path}")
 
     def _build_operator_summary(self) -> str:
         runtime_hv, configured_hv = hyperv_status()
@@ -2464,11 +2538,17 @@ class App(tk.Tk):
                 f"State file: {_state_file_path()}",
                 f"Debug report: {_debug_report_path()}",
                 f"Backup folder: {_backup_dir()}",
+                f"Support folder: {_support_bundle_dir()}",
             ]
 
             with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("summary.txt", summary + "\n")
                 archive.writestr("manifest.txt", "\n".join(manifest_lines) + "\n")
+                activity_lines = [
+                    f"{entry.get('when', '')}  {entry.get('text', '')}".rstrip()
+                    for entry in self._history_cache[-80:]
+                ]
+                archive.writestr("activity.txt", "\n".join(activity_lines) + "\n")
 
                 debug_path = _debug_report_path()
                 if os.path.exists(debug_path):
@@ -2481,6 +2561,12 @@ class App(tk.Tk):
                 for backup_path in _recent_backup_paths():
                     arcname = os.path.join("backups", os.path.basename(backup_path))
                     archive.write(backup_path, arcname=arcname)
+
+                for support_path in _recent_support_bundle_paths():
+                    if os.path.abspath(support_path) == os.path.abspath(bundle_path):
+                        continue
+                    arcname = os.path.join("recent-support", os.path.basename(support_path))
+                    archive.write(support_path, arcname=arcname)
 
             self._append_log(f"[SUPPORT] Exported support bundle to {bundle_path}")
             messagebox.showinfo(
@@ -2498,6 +2584,156 @@ class App(tk.Tk):
                 parent=self,
             )
 
+    def _show_activity_center(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title(f"{APP_NAME} Activity")
+        dialog.configure(bg=BG)
+        dialog.resizable(True, True)
+        dialog.minsize(700, 460)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        shell = tk.Frame(dialog, bg=BG, padx=18, pady=16)
+        shell.pack(fill="both", expand=True)
+
+        tk.Label(
+            shell,
+            text="Activity Center",
+            font=MONO_HDR,
+            fg=WHITE,
+            bg=BG,
+        ).pack(anchor="w")
+
+        tk.Label(
+            shell,
+            text="Recent operator actions, support exports, and rollback paths.",
+            font=MONO_SM,
+            fg=MUTED,
+            bg=BG,
+        ).pack(anchor="w", pady=(4, 12))
+
+        summary = tk.Text(
+            shell,
+            height=4,
+            bg=PANEL_ALT,
+            fg=WHITE,
+            font=MONO_SM,
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=8,
+            insertbackground=WHITE,
+        )
+        summary.insert("1.0", self._build_operator_summary())
+        summary.config(state="disabled")
+        summary.pack(fill="x")
+
+        tk.Label(
+            shell,
+            text=f"State: {_state_file_path()}   |   Backups: {_backup_dir()}   |   Support: {_support_bundle_dir()}",
+            font=MONO_SM,
+            fg=DIM,
+            bg=BG,
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", pady=(10, 8))
+
+        history_frame = tk.Frame(
+            shell,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        history_frame.pack(fill="both", expand=True)
+
+        history = tk.Text(
+            history_frame,
+            bg=PANEL,
+            fg=DIM,
+            font=MONO_SM,
+            relief="flat",
+            wrap="word",
+            padx=10,
+            pady=8,
+            insertbackground=WHITE,
+        )
+        history.pack(fill="both", expand=True)
+
+        entries = self._history_cache[-60:]
+        if entries:
+            for entry in entries:
+                history.insert("end", f"{entry.get('when', '')}  {entry.get('text', '')}\n")
+        else:
+            history.insert("end", "No persisted activity yet.\n")
+        history.config(state="disabled")
+
+        button_row = tk.Frame(shell, bg=BG)
+        button_row.pack(fill="x", pady=(12, 0))
+
+        tk.Button(
+            button_row,
+            text="OPEN SUPPORT",
+            command=self._open_support_folder,
+            font=("Consolas", 9, "bold"),
+            fg=GREEN,
+            bg="#062118",
+            activeforeground=GREEN,
+            activebackground="#0a3023",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left")
+
+        tk.Button(
+            button_row,
+            text="OPEN BACKUPS",
+            command=self._open_backup_folder,
+            font=("Consolas", 9, "bold"),
+            fg=BLUE,
+            bg="#101a28",
+            activeforeground=BLUE,
+            activebackground="#152235",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row,
+            text="EXPORT SUPPORT",
+            command=self._export_support_bundle,
+            font=("Consolas", 9, "bold"),
+            fg=ACCENT,
+            bg="#102123",
+            activeforeground=ACCENT,
+            activebackground="#173136",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
+
+        tk.Button(
+            button_row,
+            text="CLOSE",
+            command=dialog.destroy,
+            font=("Consolas", 9, "bold"),
+            fg=WHITE,
+            bg="#1b2633",
+            activeforeground=WHITE,
+            activebackground="#243246",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="right")
+
     def _on_mode_changed(self, _value=None) -> None:
         target_mode = self._mode_var.get()
         if target_mode == "Advanced" and self._last_mode != "Advanced":
@@ -2511,7 +2747,10 @@ class App(tk.Tk):
             if not proceed:
                 self._mode_var.set(self._last_mode)
                 return
+        if target_mode != self._last_mode:
+            self._record_activity(f"[MODE] Switched to {target_mode}.")
         self._last_mode = target_mode
+        self._persist_tool_state()
         self._apply_mode()
 
     def _basic_mode(self) -> bool:
