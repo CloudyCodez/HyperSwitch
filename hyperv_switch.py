@@ -339,8 +339,15 @@ def _timestamp_slug() -> str:
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _export_bcd_backup(tag: str) -> tuple[bool, str]:
-    path = os.path.join(_backup_dir(), f"{_timestamp_slug()}-{tag}.bcd")
+def _backup_session_name(tag: str, stamp: str | None = None) -> str:
+    clean_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", tag.strip().lower()).strip("-")
+    if not clean_tag:
+        clean_tag = "change"
+    return f"{stamp or _timestamp_slug()}-{clean_tag}"
+
+
+def _export_bcd_backup(session_name: str) -> tuple[bool, str]:
+    path = os.path.join(_backup_dir(), f"{session_name}-bcd.bcd")
     try:
         proc = subprocess.run(
             ["bcdedit", "/export", path],
@@ -356,13 +363,12 @@ def _export_bcd_backup(tag: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _export_registry_backup(tag: str, paths: tuple[str, ...]) -> tuple[list[str], list[str]]:
+def _export_registry_backup(session_name: str, paths: tuple[str, ...]) -> tuple[list[str], list[str]]:
     exported: list[str] = []
     failures: list[str] = []
-    stamp = _timestamp_slug()
     for index, path in enumerate(paths, start=1):
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", path)
-        out_path = os.path.join(_backup_dir(), f"{stamp}-{tag}-{index:02d}-{safe_name}.reg")
+        out_path = os.path.join(_backup_dir(), f"{session_name}-reg-{index:02d}-{safe_name}.reg")
         try:
             proc = subprocess.run(
                 ["reg", "export", f"HKLM\\{path}", out_path, "/y"],
@@ -377,6 +383,56 @@ def _export_registry_backup(tag: str, paths: tuple[str, ...]) -> tuple[list[str]
         except OSError as exc:
             failures.append(f"{path}: {exc}")
     return exported, failures
+
+
+def _backup_session_key(path: str) -> str:
+    stem = os.path.splitext(os.path.basename(path))[0]
+    lower_stem = stem.lower()
+    if lower_stem.endswith("-bcd"):
+        return stem[:-4]
+    if "-reg-" in lower_stem:
+        marker = lower_stem.index("-reg-")
+        return stem[:marker]
+
+    match = re.match(r"^(?P<base>.+)-\d{2}-[^\\/:*?\"<>|]+$", stem)
+    if match:
+        return match.group("base")
+    return stem
+
+
+def _backup_session_label(session_name: str) -> str:
+    match = re.match(r"^(?P<stamp>\d{8}-\d{6})-(?P<tag>.+)$", session_name)
+    if not match:
+        return session_name
+
+    raw_tag = match.group("tag").replace("-", " ").replace("_", " ").strip()
+    label = " ".join(part for part in raw_tag.split() if part)
+    return label.upper() if label else session_name
+
+
+def _backup_restore_sets(limit: int = 10) -> list[dict[str, object]]:
+    grouped: dict[str, list[str]] = {}
+    for path in _recent_backup_paths(80):
+        session_name = _backup_session_key(path)
+        grouped.setdefault(session_name, []).append(path)
+
+    sets: list[dict[str, object]] = []
+    for session_name, paths in grouped.items():
+        sorted_paths = sorted(paths, key=lambda item: (item.lower().endswith(".bcd"), item.lower()))
+        latest_mtime = max((os.path.getmtime(path) for path in paths), default=0.0)
+        total_size = sum(_path_size(path) for path in paths)
+        sets.append(
+            {
+                "session_name": session_name,
+                "label": _backup_session_label(session_name),
+                "paths": sorted_paths,
+                "latest_mtime": latest_mtime,
+                "total_size": total_size,
+            }
+        )
+
+    sets.sort(key=lambda item: item["latest_mtime"], reverse=True)
+    return sets[:limit]
 
 
 def _load_tool_state() -> dict:
@@ -1030,6 +1086,14 @@ def _format_bytes(byte_count: int) -> str:
 def _format_mtime(path: str) -> str:
     try:
         stamp = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+        return stamp.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "unknown time"
+
+
+def _format_epoch(value: float | int | None) -> str:
+    try:
+        stamp = datetime.datetime.fromtimestamp(float(value or 0.0))
         return stamp.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "unknown time"
@@ -2268,9 +2332,10 @@ class App(tk.Tk):
         subtitle += "   |   SAFETY MODE: registry-only toggle disabled"
         self._row_hello.set_subtitle(subtitle)
 
-    def _backup_changes(self, tag: str, reg_paths: tuple[str, ...]) -> tuple[bool, str]:
+    def _backup_changes(self, tag: str, reg_paths: tuple[str, ...]) -> tuple[bool, str, str]:
         parts: list[str] = []
-        ok_bcd, bcd_result = _export_bcd_backup(tag)
+        session_name = _backup_session_name(tag)
+        ok_bcd, bcd_result = _export_bcd_backup(session_name)
         if ok_bcd:
             parts.append(f"BCD backup: {bcd_result}")
         else:
@@ -2278,14 +2343,15 @@ class App(tk.Tk):
 
         failures: list[str] = []
         if reg_paths:
-            exported, failures = _export_registry_backup(tag, reg_paths)
+            exported, failures = _export_registry_backup(session_name, reg_paths)
             if exported:
                 parts.append(f"Registry backup: {len(exported)} key(s)")
             if failures:
                 parts.append("Registry backup issues:\n- " + "\n- ".join(failures))
 
         ok = ok_bcd and not failures
-        return ok, "\n\n".join(parts)
+        parts.append(f"Restore set: {session_name}")
+        return ok, "\n\n".join(parts), session_name
 
     def _basic_preflight(self, label: str, want_enabled: bool) -> bool:
         if not self._basic_mode():
@@ -2372,8 +2438,8 @@ class App(tk.Tk):
         ):
             return False
 
-        ok_backup, detail = self._backup_changes(label.lower().replace(" ", "-"), reg_paths)
-        self._append_log(f"[BACKUP] {label}  {'OK' if ok_backup else 'WARN'}")
+        ok_backup, detail, session_name = self._backup_changes(label.lower().replace(" ", "-"), reg_paths)
+        self._append_log(f"[BACKUP] {label}  {'OK' if ok_backup else 'WARN'}  SET {session_name}")
         if not ok_backup:
             proceed = messagebox.askyesno(
                 "Backup warning",
@@ -2902,6 +2968,163 @@ class App(tk.Tk):
             ]
         )
 
+    def _build_restore_set_summary(self, restore_set: dict[str, object]) -> str:
+        paths = [str(path) for path in restore_set.get("paths", [])]
+        lines = [
+            f"Restore set: {restore_set.get('label', 'UNKNOWN')}",
+            f"Session: {restore_set.get('session_name', 'unknown')}",
+            f"Modified: {_format_epoch(restore_set.get('latest_mtime', 0.0))}",
+            f"Artifacts: {len(paths)}",
+            f"Total size: {_format_bytes(int(restore_set.get('total_size', 0) or 0))}",
+        ]
+
+        lines.append("Files:")
+        for path in paths:
+            lines.append(f"- {os.path.basename(path)}")
+
+        commands = [command for command in (_backup_restore_command(path) for path in paths) if command]
+        if commands:
+            lines.append("")
+            lines.append("Restore commands:")
+            for command in commands:
+                lines.append(f"- {command}")
+        return "\n".join(lines)
+
+    def _copy_restore_set_commands(self, restore_set: dict[str, object] | None) -> None:
+        if not restore_set:
+            messagebox.showinfo(
+                "No restore set selected",
+                "Select a restore set first.",
+                parent=self,
+            )
+            return
+
+        commands = [
+            command
+            for command in (_backup_restore_command(str(path)) for path in restore_set.get("paths", []))
+            if command
+        ]
+        if not commands:
+            messagebox.showinfo(
+                "No restore commands",
+                "HyperSwitch could not build manual restore commands for the selected set.",
+                parent=self,
+            )
+            return
+
+        payload = "\n".join(commands)
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            self.update_idletasks()
+            self._append_log(
+                f"[RECOVERY] Copied restore set commands  {restore_set.get('session_name', 'unknown')}"
+            )
+            messagebox.showinfo(
+                "Restore commands copied",
+                "HyperSwitch copied the manual restore commands for the selected set.",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Clipboard error",
+                f"HyperSwitch could not copy the restore set commands.\n\n{exc}",
+                parent=self,
+            )
+
+    def _apply_restore_set(self, restore_set: dict[str, object] | None) -> None:
+        if not restore_set:
+            messagebox.showinfo(
+                "No restore set selected",
+                "Select a restore set first.",
+                parent=self,
+            )
+            return
+
+        session_name = str(restore_set.get("session_name", "unknown"))
+        label = str(restore_set.get("label", session_name))
+        paths = [str(path) for path in restore_set.get("paths", []) if isinstance(path, str)]
+        if not paths:
+            messagebox.showinfo(
+                "Empty restore set",
+                "HyperSwitch could not find any artifacts in the selected restore set.",
+                parent=self,
+            )
+            return
+
+        reg_paths = [path for path in paths if path.lower().endswith(".reg")]
+        bcd_paths = [path for path in paths if path.lower().endswith(".bcd")]
+        summary = self._build_restore_set_summary(restore_set)
+        proceed = self._ask_two_option_dialog(
+            "Apply restore set",
+            "Apply the selected restore set now?\n\n"
+            "HyperSwitch will import any saved registry exports first, then restore the BCD store.\n\n"
+            + summary,
+            "APPLY SET",
+            "CANCEL",
+        )
+        if not proceed:
+            return
+
+        failures: list[str] = []
+        applied_labels: list[str] = []
+
+        for path in reg_paths:
+            try:
+                proc = subprocess.run(
+                    ["reg", "import", path],
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except OSError as exc:
+                failures.append(f"{os.path.basename(path)}: {exc}")
+                continue
+            if proc.returncode != 0:
+                output = (proc.stdout + proc.stderr).strip() or "reg import failed."
+                failures.append(f"{os.path.basename(path)}: {output}")
+            else:
+                applied_labels.append(os.path.basename(path))
+
+        for path in bcd_paths:
+            try:
+                proc = subprocess.run(
+                    ["bcdedit", "/import", path],
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except OSError as exc:
+                failures.append(f"{os.path.basename(path)}: {exc}")
+                continue
+            if proc.returncode != 0:
+                output = (proc.stdout + proc.stderr).strip() or "bcdedit /import failed."
+                failures.append(f"{os.path.basename(path)}: {output}")
+            else:
+                applied_labels.append(os.path.basename(path))
+
+        if failures:
+            self._append_log(f"[RECOVERY] Restore set failed  {session_name}")
+            messagebox.showerror(
+                "Restore set failed",
+                "HyperSwitch could not fully apply the selected restore set.\n\n"
+                + "\n\n".join(failures),
+                parent=self,
+            )
+            return
+
+        self._append_log(f"[RECOVERY] Applied restore set  {session_name}")
+        self._refresh_all_async()
+        messagebox.showinfo(
+            "Restore set applied",
+            "HyperSwitch applied the selected restore set.\n\n"
+            f"Set: {label}\n"
+            f"Artifacts: {len(applied_labels)}",
+            parent=self,
+        )
+        if bcd_paths:
+            self._confirm_reboot()
+
     def _copy_restore_command(self, path: str) -> None:
         if not path:
             messagebox.showinfo(
@@ -3039,6 +3262,7 @@ class App(tk.Tk):
     def _build_recovery_notes(self) -> str:
         recent_backups = _recent_backup_paths(5)
         recent_support = _recent_support_bundle_paths(5)
+        recent_restore_sets = _backup_restore_sets(5)
         pending = ", ".join(_pending_reboot_reasons()) or "none"
         update_summary = self._build_update_summary().splitlines()
 
@@ -3059,12 +3283,18 @@ class App(tk.Tk):
         for line in update_summary:
             lines.append(f"- {line}")
 
-        lines.extend(
-            [
-                "",
-            "Recent backups:",
-            ]
-        )
+        lines.append("")
+        lines.append("Recent restore sets:")
+        if recent_restore_sets:
+            for restore_set in recent_restore_sets:
+                lines.append(
+                    f"- {restore_set.get('label', 'UNKNOWN')}  |  {len(restore_set.get('paths', []))} artifact(s)"
+                )
+        else:
+            lines.append("- none yet")
+
+        lines.append("")
+        lines.append("Recent backups:")
 
         if recent_backups:
             for path in recent_backups:
@@ -3222,7 +3452,7 @@ class App(tk.Tk):
         dialog.title(f"{APP_NAME} Recovery")
         dialog.configure(bg=BG)
         dialog.resizable(True, True)
-        dialog.minsize(760, 520)
+        dialog.minsize(980, 640)
         dialog.transient(self)
         dialog.grab_set()
 
@@ -3239,7 +3469,7 @@ class App(tk.Tk):
 
         tk.Label(
             shell,
-            text="Rollback visibility for recent backups, support exports, and next-step guidance.",
+            text="Grouped restore sets, raw backup artifacts, support exports, and next-step guidance.",
             font=MONO_SM,
             fg=MUTED,
             bg=BG,
@@ -3260,6 +3490,47 @@ class App(tk.Tk):
         notes.insert("1.0", self._build_recovery_notes())
         notes.config(state="disabled")
         notes.pack(fill="x")
+
+        restore_card = tk.Frame(
+            shell,
+            bg=PANEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+        )
+        restore_card.pack(fill="x", pady=(12, 0))
+
+        tk.Label(
+            restore_card,
+            text="RESTORE SETS",
+            font=MONO_LG,
+            fg=WHITE,
+            bg=PANEL,
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        restore_list = tk.Listbox(
+            restore_card,
+            height=5,
+            bg=PANEL_ALT,
+            fg=WHITE,
+            font=MONO_SM,
+            relief="flat",
+            selectbackground="#243246",
+            selectforeground=WHITE,
+            activestyle="none",
+        )
+        restore_list.pack(fill="x", padx=10, pady=(0, 10))
+
+        restore_sets = _backup_restore_sets(12)
+        if restore_sets:
+            for restore_set in restore_sets:
+                latest_stamp = _format_epoch(restore_set.get("latest_mtime", 0.0))
+                restore_list.insert(
+                    "end",
+                    f"{latest_stamp}  |  {restore_set.get('label', 'UNKNOWN')}  |  {len(restore_set.get('paths', []))} artifact(s)",
+                )
+            restore_list.selection_set(0)
+        else:
+            restore_list.insert("end", "No restore sets found yet.")
 
         lists = tk.Frame(shell, bg=BG)
         lists.pack(fill="both", expand=True, pady=(12, 0))
@@ -3350,7 +3621,7 @@ class App(tk.Tk):
         )
         details.pack(fill="x", pady=(12, 0))
 
-        current_focus = {"kind": "backup" if backup_paths else "support"}
+        current_focus = {"kind": "restore_set" if restore_sets else ("backup" if backup_paths else "support")}
 
         def selected_path(paths: list[str], listbox: tk.Listbox) -> str | None:
             if not paths:
@@ -3361,8 +3632,23 @@ class App(tk.Tk):
                 return None
             return paths[index]
 
+        def selected_restore_set() -> dict[str, object] | None:
+            if not restore_sets:
+                return None
+            selection = restore_list.curselection()
+            index = selection[0] if selection else 0
+            if index < 0 or index >= len(restore_sets):
+                return None
+            return restore_sets[index]
+
         def refresh_details() -> None:
-            if current_focus["kind"] == "support":
+            if current_focus["kind"] == "restore_set":
+                restore_set = selected_restore_set()
+                if restore_set:
+                    text = self._build_restore_set_summary(restore_set)
+                else:
+                    text = "Select a restore set to view details."
+            elif current_focus["kind"] == "support":
                 path = selected_path(support_paths, support_list)
                 if path:
                     text = self._build_support_artifact_summary(path)
@@ -3402,12 +3688,49 @@ class App(tk.Tk):
             current_focus["kind"] = "support"
             refresh_details()
 
+        def on_restore_set_select(_event=None) -> None:
+            current_focus["kind"] = "restore_set"
+            refresh_details()
+
+        restore_list.bind("<<ListboxSelect>>", on_restore_set_select)
         backup_list.bind("<<ListboxSelect>>", on_backup_select)
         support_list.bind("<<ListboxSelect>>", on_support_select)
         refresh_details()
 
         button_row_top = tk.Frame(shell, bg=BG)
         button_row_top.pack(fill="x", pady=(12, 0))
+
+        tk.Button(
+            button_row_top,
+            text="APPLY SET",
+            command=lambda: self._apply_restore_set(selected_restore_set()),
+            font=("Consolas", 9, "bold"),
+            fg=GREEN,
+            bg="#062118",
+            activeforeground=GREEN,
+            activebackground="#0a3023",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left")
+
+        tk.Button(
+            button_row_top,
+            text="COPY SET CMDS",
+            command=lambda: self._copy_restore_set_commands(selected_restore_set()),
+            font=("Consolas", 9, "bold"),
+            fg=ACCENT,
+            bg="#102123",
+            activeforeground=ACCENT,
+            activebackground="#173136",
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        ).pack(side="left", padx=(10, 0))
 
         tk.Button(
             button_row_top,
@@ -3423,7 +3746,7 @@ class App(tk.Tk):
             padx=12,
             pady=6,
             cursor="hand2",
-        ).pack(side="left")
+        ).pack(side="left", padx=(10, 0))
 
         tk.Button(
             button_row_top,
