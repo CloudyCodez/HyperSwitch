@@ -21,7 +21,6 @@ from hyperswitch.features import (
     HELLO_CSP_ROOT as _HELLO_CSP_ROOT,
     HELLO_GPO_PATH as _HELLO_GPO_PATH,
     HELLO_GPO_VALUE as _HELLO_GPO_VALUE,
-    HVCI_PATH_LEGACY as _HVCI_PATH_LEGACY,
     HYPERV_PLATFORM_FEATURES as _HYPERV_PLATFORM_FEATURES,
     KSHADOW_PATH as _KSHADOW_PATH,
     VBS_POLICY_PATH as _VBS_POLICY_PATH,
@@ -40,19 +39,49 @@ from hyperswitch.features import (
     vbs_set as _vbs_set_raw,
 )
 from hyperswitch.metadata import APP_NAME, APP_VERSION, DEBUG_APP_NAME, ROADMAP_TARGET
+from hyperswitch.mitigations import (
+    SPEC_MASK as _SPEC_MASK,
+    SPEC_OVERRIDE as _SPEC_OVERRIDE,
+    SPEC_REG_PATH as _SPEC_REG_PATH,
+    meltdown_is_protected,
+    spec_ps_query as _spec_ps_query,
+    spectre_is_protected,
+)
+from hyperswitch.platform import (
+    DMA_POLICY_GPO_PATH as _DMA_POLICY_GPO_PATH,
+    DMA_POLICY_PATH as _DMA_POLICY_PATH,
+    DMA_POLICY_VALUE as _DMA_POLICY_VALUE,
+    HVCI_PATH as _HVCI_PATH,
+    HVCI_PATH_LEGACY as _HVCI_PATH_LEGACY,
+    HVCI_POLICY_PATH as _HVCI_POLICY_PATH,
+    HVCI_POLICY_VALUE as _HVCI_POLICY_VALUE,
+    credential_guard_capability_reasons as _credential_guard_capability_reasons,
+    cpu_virt_status,
+    dep_available as _dep_available,
+    dma_status,
+    dma_support_available,
+    edition_supports_credential_guard as _edition_supports_credential_guard,
+    edition_supports_hyperv as _edition_supports_hyperv,
+    hvci_status,
+    hyperv_capability_reasons as _hyperv_capability_reasons,
+    os_edition as _os_edition,
+    pending_reboot_reasons as _pending_reboot_reasons,
+    pending_reboot_text as _pending_reboot_text,
+    processor_bool_property as _processor_bool_property,
+    reg_subkey_has_entries as _reg_subkey_has_entries,
+    secure_boot_enabled as _secure_boot_enabled,
+    tpm_2_ready as _tpm_2_ready,
+    uefi_firmware_present as _uefi_firmware_present,
+    vbs_capability_reasons as _vbs_capability_reasons,
+)
 from hyperswitch.queries import (
     bitlocker_protection_on as _bitlocker_protection_on,
     clear_query_caches,
     credential_guard_configured as _credential_guard_configured_raw,
     credential_guard_status as _credential_guard_status,
-    device_guard_has_value as _device_guard_has_value,
     dism_feature_state as _dism_feature_state,
     get_cpu_vendor as _get_cpu_vendor,
     hello_csp_state as _hello_csp_state_raw,
-    is_amd_fx_cpu as _is_amd_fx_cpu,
-    parse_bool_text as _parse_bool_text,
-    platform_value as _platform_value,
-    powershell_bool as _powershell_bool,
     powershell_value as _powershell_value,
     prime_device_guard_cache as _prime_device_guard_cache,
     prime_platform_cache as _prime_platform_cache,
@@ -63,7 +92,6 @@ from hyperswitch.queries import (
     query_wmi_device_guard as _query_wmi_device_guard,
     query_wmi_device_guard_list as _query_wmi_device_guard_list,
     read_registry_dword as _read_registry_dword,
-    read_registry_text as _read_registry_text,
     service_is_running as _service_is_running,
     windows_hello_present as _windows_hello_present,
     windows_hello_status as _windows_hello_status,
@@ -300,40 +328,6 @@ if not _running_as_admin():
 # bcdedit interface
 # ---------------------------------------------------------------------------
 
-def _secure_boot_enabled() -> bool | None:
-    reg_val = _read_registry_dword(
-        None,
-        r"SYSTEM\CurrentControlSet\Control\SecureBoot\State",
-        "UEFISecureBootEnabled",
-    )
-    if reg_val is not None:
-        return reg_val == 1
-    cached = _parse_bool_text(_platform_value("SecureBootEnabled"))
-    if cached is not None:
-        return cached
-    try:
-        proc = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "try { if (Confirm-SecureBootUEFI) { 'True' } else { 'False' } } catch { '' }",
-            ],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        out = proc.stdout.strip().lower()
-        if out == "true":
-            return True
-        if out == "false":
-            return False
-    except Exception:
-        pass
-    return None
-
-
 def _timestamp_slug() -> str:
     import datetime
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -465,605 +459,8 @@ def windows_hello_status() -> tuple[bool | None, str]:
     return _windows_hello_status(_HELLO_GPO_PATH, _HELLO_GPO_VALUE, _HELLO_CSP_ROOT)
 
 
-_SPEC_REG_PATH = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
-_SPEC_OVERRIDE  = "FeatureSettingsOverride"
-_SPEC_MASK      = "FeatureSettingsOverrideMask"
-
-
-def _spec_read_override_mask() -> tuple[int | None, int | None]:
-    override = _read_registry_dword(None, _SPEC_REG_PATH, _SPEC_OVERRIDE)
-    mask     = _read_registry_dword(None, _SPEC_REG_PATH, _SPEC_MASK)
-    return override, mask
-
-
-def _spec_bit_disabled(bit: int, override: int | None, mask: int | None) -> bool:
-    if override is None or mask is None:
-        return False
-    return bool((override & mask & bit) != 0)
-
-
-def _spec_ps_query(property_name: str) -> bool | None:
-    try:
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                f"try {{ Import-Module SpeculationControl -EA Stop; "
-                f"(Get-SpeculationControlSettings).{property_name} }} "
-                f"catch {{ 'UNAVAILABLE' }}",
-            ],
-            capture_output=True, text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        val = proc.stdout.strip().splitlines()[0].lower() if proc.stdout.strip() else ""
-        if val == "true":
-            return True
-        if val == "false":
-            return False
-        return None
-    except Exception:
-        return None
-
-
-def meltdown_is_protected() -> bool | None:
-    vendor = _get_cpu_vendor()
-    if vendor == "amd":
-        return True
-
-    override, mask = _spec_read_override_mask()
-
-    if override is None and mask is None:
-        return True
-
-    if _spec_bit_disabled(0x02, override, mask):
-        return False
-
-    for prop in ("KVAShadowWindowsSupportEnabled", "KVAShadowWindowsSupportPresent"):
-        ps = _spec_ps_query(prop)
-        if ps is not None:
-            return ps
-
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE, _SPEC_REG_PATH, 0,
-            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
-        )
-        ov, _ = winreg.QueryValueEx(key, _SPEC_OVERRIDE)
-        mk, _ = winreg.QueryValueEx(key, _SPEC_MASK)
-        winreg.CloseKey(key)
-        if isinstance(ov, int) and isinstance(mk, int):
-            if (ov & mk & 0x02) != 0:
-                return False
-    except Exception:
-        pass
-
-    return True
-
-
-def spectre_is_protected() -> bool | None:
-    override, mask = _spec_read_override_mask()
-    vendor = _get_cpu_vendor()
-
-    if override is None and mask is None:
-        return True
-
-    v2_disabled = _spec_bit_disabled(0x001, override, mask)
-    v4_disabled = _spec_bit_disabled(0x100, override, mask)
-
-    if v2_disabled or v4_disabled:
-        return False
-
-    if vendor == "intel":
-        if _spec_bit_disabled(0x008, override, mask):
-            return False
-        if _spec_bit_disabled(0x010, override, mask):
-            return False
-
-    for prop in ("BTIWindowsSupportEnabled", "SSBDWindowsSupportEnabled",
-                 "BTIWindowsSupportPresent"):
-        ps = _spec_ps_query(prop)
-        if ps is not None:
-            if not ps:
-                return False
-            break
-
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE, _SPEC_REG_PATH, 0,
-            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
-        )
-        ov, _ = winreg.QueryValueEx(key, _SPEC_OVERRIDE)
-        mk, _ = winreg.QueryValueEx(key, _SPEC_MASK)
-        winreg.CloseKey(key)
-        if isinstance(ov, int) and isinstance(mk, int):
-            bits = 0x101 if vendor == "amd" else 0x11B  # V2+V4 for both; +L1TF+MDS Intel
-            if (ov & mk & bits) != 0:
-                return False
-    except Exception:
-        pass
-
-    return True
-
-
-# --- Core Isolation / Memory Integrity (HVCI) --------------------------------
-# Windows Security calls this "Core Isolation > Memory Integrity".
-# The feature is Hypervisor-Protected Code Integrity (HVCI), controlled by:
-#   HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HyperGuard
-#   Value: Enabled  REG_DWORD  0 = off, 1 = on
-# Changes take effect after reboot.
-
-_HVCI_PATH  = r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HyperGuard"
-_HVCI_VALUE = "Enabled"
-_HVCI_PATH_LEGACY = (
-    r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"
-)
-_HVCI_POLICY_PATH = r"SOFTWARE\Policies\Microsoft\Windows\DeviceGuard"
-_HVCI_POLICY_VALUE = "HypervisorEnforcedCodeIntegrity"
-
-
-def hvci_is_active() -> bool | None:
-    runtime, configured = hvci_status()
-    if runtime is not None:
-        return runtime
-    if configured is not None:
-        return configured
-    return None
-
-
-def hvci_status() -> tuple[bool | None, bool | None]:
-    runtime = None
-    configured = None
-
-    dg_running = _device_guard_has_value("SecurityServicesRunning", 2)
-    if dg_running is not None:
-        runtime = dg_running
-
-    if runtime is None:
-        val = _query_wmi_device_guard("HyperVisorEnforcedCodeIntegrityStatus")
-        if val is not None:
-            runtime = val >= 1
-
-    if runtime is None:
-        ci_opts = _query_kernel_ci_options()
-        if ci_opts is not None:
-            runtime = bool(ci_opts & 0x80)
-
-    if runtime is None:
-        val = _read_registry_dword(
-            None, r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Status", "HvciStatus"
-        )
-        if val is not None:
-            runtime = val >= 1
-
-    config_seen = False
-    config_enabled = False
-
-    dg_cfg = _device_guard_has_value("SecurityServicesConfigured", 2)
-    if dg_cfg is not None:
-        config_seen = True
-        if dg_cfg:
-            config_enabled = True
-
-    for reg_path, reg_name in (
-        (_HVCI_PATH, _HVCI_VALUE),
-        (_HVCI_PATH_LEGACY, "Enabled"),
-        (_HVCI_POLICY_PATH, _HVCI_POLICY_VALUE),
-    ):
-        v = _read_registry_dword(None, reg_path, reg_name)
-        if v is not None:
-            config_seen = True
-            if v >= 1:
-                config_enabled = True
-
-    if not config_seen and runtime is True:
-        configured = True
-
-    if config_seen:
-        configured = config_enabled
-
-    return runtime, configured
-
-
-# --- Kernel DMA Protection ---------------------------------------------------
-# Firmware support and OS policy are separate here. The tool reads both.
-
-_DMA_POLICY_PATH  = r"SYSTEM\CurrentControlSet\Control\DmaSecurity"
-_DMA_POLICY_GPO_PATH = r"SOFTWARE\Policies\Microsoft\Windows\Kernel DMA Protection"
-_DMA_POLICY_VALUE = "DeviceEnumerationPolicy"
-_DMA_STATUS_PATH  = r"SYSTEM\CurrentControlSet\Control\DmaSecurity"
-
-
-def dma_support_available() -> bool | None:
-    props = _query_wmi_device_guard_list("AvailableSecurityProperties")
-    if props is not None:
-        return 3 in props
-
-    for path in (
-        r"SYSTEM\CurrentControlSet\Control\DmaSecurity\Default\VerifiedBuses\HSTI",
-        r"SYSTEM\CurrentControlSet\Control\DmaSecurity\VerifiedBuses\HSTI",
-    ):
-        hsti = _reg_subkey_has_entries(path)
-        if hsti is not None:
-            return bool(hsti)
-
-    return None
-
-
-# --- CPU Virtualization (VT-x / AMD-V) ---------------------------------------
-# Read-only status -- reflects the BIOS/UEFI firmware setting.
-# Read-only. This tracks the firmware virtualization state shown by Task Manager.
-
-def _virt_firmware_api_enabled() -> bool | None:
-    try:
-        return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(ctypes.c_uint(21)))
-    except Exception:
-        return None
-
-
-def cpu_virt_status() -> tuple[bool | None, str]:
-    api_val = _virt_firmware_api_enabled()
-    if api_val is not None:
-        return api_val, "PF_VIRT_FIRMWARE_ENABLED API"
-
-    direct_sources: list[tuple[bool, str]] = []
-
-    val = _parse_bool_text(_query_processor_value("VirtualizationFirmwareEnabled"))
-    if val is not None:
-        direct_sources.append((val, "CIM Win32_Processor.VirtualizationFirmwareEnabled"))
-
-    raw = _wmic_property_value("cpu", "VirtualizationFirmwareEnabled")
-    val = _parse_bool_text(raw)
-    if val is not None:
-        direct_sources.append((val, "WMIC cpu.VirtualizationFirmwareEnabled"))
-
-    val = _powershell_bool(
-        "(Get-WmiObject -Class Win32_Processor "
-        "-ErrorAction SilentlyContinue | Select-Object -First 1)"
-        ".VirtualizationFirmwareEnabled"
-    )
-    if val is not None:
-        direct_sources.append((val, "WMI Win32_Processor.VirtualizationFirmwareEnabled"))
-
-    for state, source in direct_sources:
-        if state is False:
-            return False, source
-    for state, source in direct_sources:
-        if state is True:
-            return True, source
-
-    val = _powershell_bool(
-        "(Get-ComputerInfo -Property HyperVRequirementVirtualizationFirmwareEnabled "
-        "-EA SilentlyContinue).HyperVRequirementVirtualizationFirmwareEnabled"
-    )
-    if val is not None:
-        return val, "Get-ComputerInfo HyperVRequirementVirtualizationFirmwareEnabled"
-
-    # Do not promote Hyper-V runtime state into a firmware result.
-    # A running hypervisor is not the same thing as the BIOS virtualization toggle.
-    return None, "No firmware virtualization signal"
-
-
-def cpu_virt_is_enabled() -> bool | None:
-    state, _ = cpu_virt_status()
-    return state
-
-
-def _processor_bool_property(property_name: str) -> bool | None:
-    if property_name == "VMMonitorModeExtensions":
-        cached = _parse_bool_text(_platform_value("HyperVRequirementVMMonitorModeExtensions"))
-        if cached is not None:
-            return cached
-    if property_name == "SecondLevelAddressTranslationExtensions":
-        cached = _parse_bool_text(_platform_value("HyperVRequirementSecondLevelAddressTranslation"))
-        if cached is not None:
-            return cached
-
-    val = _parse_bool_text(_query_processor_value(property_name))
-    if val is not None:
-        return val
-
-    raw = _wmic_property_value("cpu", property_name)
-    val = _parse_bool_text(raw)
-    if val is not None:
-        return val
-
-    val = _powershell_bool(
-        f"(Get-CimInstance Win32_Processor -EA SilentlyContinue | Select-Object -First 1).{property_name}"
-    )
-    if val is not None:
-        return val
-
-    return None
-
-
-def _dep_available() -> bool | None:
-    cached = _parse_bool_text(_platform_value("HyperVRequirementDataExecutionPreventionAvailable"))
-    if cached is not None:
-        return cached
-    val = _powershell_bool(
-        "(Get-ComputerInfo -Property HyperVRequirementDataExecutionPreventionAvailable "
-        "-EA SilentlyContinue).HyperVRequirementDataExecutionPreventionAvailable"
-    )
-    if val is not None:
-        return val
-
-    raw = _wmic_property_value("OS", "DataExecutionPrevention_Available")
-    return _parse_bool_text(raw)
-
-
-def _uefi_firmware_present() -> bool | None:
-    val = _read_registry_dword(None, r"SYSTEM\CurrentControlSet\Control", "PEFirmwareType")
-    if val is not None:
-        if val == 2:
-            return True
-        if val == 1:
-            return False
-
-    raw = _platform_value("BiosFirmwareType").lower()
-    if not raw:
-        raw = _powershell_value(
-            "try { [string](Get-ComputerInfo -Property BiosFirmwareType -EA SilentlyContinue).BiosFirmwareType } catch { '' }"
-        ).lower()
-    if "uefi" in raw:
-        return True
-    if raw in ("legacy", "bios"):
-        return False
-    return None
-
-
-def _tpm_2_ready() -> bool | None:
-    present = _parse_bool_text(_platform_value("TpmPresent"))
-    ready = _parse_bool_text(_platform_value("TpmReady"))
-    spec = _platform_value("TpmSpecVersion")
-    if present is not None or ready is not None or spec:
-        if present is False:
-            return False
-        if ready is False:
-            return False
-        if "2.0" in spec:
-            return True
-
-    raw = _powershell_value(
-        "try { "
-        "$t = Get-Tpm -EA Stop; "
-        "if ($null -eq $t) { '' } else { "
-        "[string]$t.TpmPresent + '|' + [string]$t.TpmReady + '|' + [string]$t.SpecVersion } "
-        "} catch { '' }"
-    )
-    if raw:
-        parts = raw.split("|")
-        if len(parts) >= 3:
-            present = _parse_bool_text(parts[0])
-            ready = _parse_bool_text(parts[1])
-            spec = parts[2]
-            if present is False:
-                return False
-            if ready is False:
-                return False
-            if "2.0" in spec:
-                return True
-    return None
-
-
-def _os_edition() -> str:
-    cached = _platform_value("WindowsEditionId")
-    if cached:
-        return cached
-    return _read_registry_text(None, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "EditionID")
-
-
-def _pending_reboot_reasons() -> list[str]:
-    reasons: list[str] = []
-    checks = (
-        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending", ""),
-        (r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired", ""),
-        (r"SYSTEM\CurrentControlSet\Control\Session Manager", "PendingFileRenameOperations"),
-    )
-    for path, value in checks:
-        try:
-            if value:
-                raw = _read_registry_text(None, path, value)
-                if raw:
-                    reasons.append(path.split("\\")[-1])
-            else:
-                proc = subprocess.run(
-                    ["reg", "query", f"HKLM\\{path}"],
-                    capture_output=True, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                if proc.returncode == 0:
-                    reasons.append(path.split("\\")[-1])
-        except Exception:
-            pass
-    return reasons
-
-
-def _edition_supports_hyperv() -> bool | None:
-    edition = (_os_edition() or "").lower()
-    if not edition:
-        return None
-    if any(tag in edition for tag in ("professional", "enterprise", "education", "server")):
-        return True
-    if any(tag in edition for tag in ("core", "home")):
-        return False
-    return None
-
-
-def _edition_supports_credential_guard() -> bool | None:
-    edition = (_os_edition() or "").lower()
-    if not edition:
-        return None
-    if any(tag in edition for tag in ("enterprise", "education", "server")):
-        return True
-    if any(tag in edition for tag in ("professional", "core", "home")):
-        return False
-    return None
-
-
-def _hyperv_capability_reasons() -> list[str]:
-    reasons: list[str] = []
-    edition_ok = _edition_supports_hyperv()
-    if edition_ok is False:
-        reasons.append("Windows edition does not include Hyper-V.")
-
-    cpuvirt = cpu_virt_is_enabled()
-    if cpuvirt is False:
-        reasons.append("Firmware virtualization is off in BIOS / UEFI.")
-
-    vmx = _processor_bool_property("VMMonitorModeExtensions")
-    if vmx is False:
-        reasons.append("VM Monitor Mode Extensions are missing.")
-
-    slat = _processor_bool_property("SecondLevelAddressTranslationExtensions")
-    if slat is False:
-        reasons.append("SLAT is missing.")
-
-    dep = _dep_available()
-    if dep is False:
-        reasons.append("NX / DEP is not available.")
-
-    return reasons
-
-
-def _vbs_capability_reasons() -> list[str]:
-    reasons = list(_hyperv_capability_reasons())
-
-    if _is_amd_fx_cpu():
-        reasons.append("AMD FX is treated as unsupported for VBS-family changes in HyperSwitch.")
-
-    uefi = _uefi_firmware_present()
-    if uefi is False:
-        reasons.append("UEFI firmware is not active.")
-
-    tpm = _tpm_2_ready()
-    if tpm is False:
-        reasons.append("TPM 2.0 is missing or not ready.")
-
-    return reasons
-
-
-def _credential_guard_capability_reasons() -> list[str]:
-    reasons = list(_vbs_capability_reasons())
-    edition_ok = _edition_supports_credential_guard()
-    if edition_ok is False:
-        reasons.append("Windows edition does not support Credential Guard.")
-    return reasons
-
-
 def _first_reason(reasons: list[str]) -> str:
     return reasons[0] if reasons else ""
-
-
-def _pending_reboot_text() -> str:
-    reasons = _pending_reboot_reasons()
-    if not reasons:
-        return ""
-    return "PENDING REBOOT: " + ", ".join(reasons)
-
-
-def _reg_subkey_has_entries(path: str) -> bool | None:
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
-            subkeys, values, _ = winreg.QueryInfoKey(key)
-            return (subkeys > 0) or (values > 0)
-    except FileNotFoundError:
-        return None
-    except Exception:
-        try:
-            proc = subprocess.run(
-                ["reg", "query", f"HKLM\\{path}"],
-                capture_output=True, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if proc.returncode != 0:
-                return None
-            lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-            return len(lines) > 1
-        except Exception:
-            return None
-
-
-def dma_is_active() -> bool | None:
-    runtime, policy = dma_status()
-    if runtime is not None:
-        return runtime
-    if policy is not None:
-        return policy
-    return None
-
-
-def dma_status() -> tuple[bool | None, bool | None]:
-    runtime = None
-    policy = None
-
-    wmi_dma = _query_wmi_device_guard("KernelDmaProtectionEnabled")
-    if wmi_dma is not None:
-        runtime = wmi_dma >= 1
-
-    if runtime is None:
-        hsti = _reg_subkey_has_entries(
-            r"SYSTEM\CurrentControlSet\Control\DmaSecurity\Default\VerifiedBuses\HSTI"
-        )
-        if hsti is not None:
-            runtime = bool(hsti)
-
-    if runtime is None:
-        hsti = _reg_subkey_has_entries(
-            r"SYSTEM\CurrentControlSet\Control\DmaSecurity\VerifiedBuses\HSTI"
-        )
-        if hsti is not None:
-            runtime = bool(hsti)
-
-    if runtime is None:
-        allowed = _reg_subkey_has_entries(
-            r"SYSTEM\CurrentControlSet\Control\DmaSecurity\Default\AllowedBuses"
-        )
-        if allowed is not None:
-            runtime = bool(allowed)
-    if runtime is None:
-        unallowed = _reg_subkey_has_entries(
-            r"SYSTEM\CurrentControlSet\Control\DmaSecurity\Default\UnallowedBuses"
-        )
-        if unallowed is not None:
-            runtime = bool(unallowed)
-
-    if runtime is None:
-        allowed = _reg_subkey_has_entries(
-            r"SYSTEM\CurrentControlSet\Control\DmaSecurity\AllowedBuses"
-        )
-        if allowed is not None:
-            runtime = bool(allowed)
-    if runtime is None:
-        unallowed = _reg_subkey_has_entries(
-            r"SYSTEM\CurrentControlSet\Control\DmaSecurity\UnallowedBuses"
-        )
-        if unallowed is not None:
-            runtime = bool(unallowed)
-
-    if runtime is None:
-        wmi_dma = _query_wmi_device_guard("KernelDmaProtectionEnabled")
-        if wmi_dma is not None:
-            runtime = wmi_dma >= 1
-
-    policy_val = _read_registry_dword(None, _DMA_POLICY_PATH, _DMA_POLICY_VALUE)
-    gpo_val = _read_registry_dword(None, _DMA_POLICY_GPO_PATH, _DMA_POLICY_VALUE)
-    if gpo_val is not None:
-        policy_val = gpo_val
-    if policy_val is not None:
-        if policy_val <= 1:
-            policy = True
-        elif policy_val == 2:
-            policy = False
-    else:
-        wmi_dma = _query_wmi_device_guard("KernelDmaProtectionEnabled")
-        if wmi_dma is not None:
-            policy = wmi_dma >= 1
-        else:
-            policy = False
-
-    return runtime, policy
 
 
 # ---------------------------------------------------------------------------
