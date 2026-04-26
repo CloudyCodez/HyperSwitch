@@ -63,4 +63,5 @@ Write-Host "  dist\\HyperSwitchDBG.exe"
 
 Invoke-PythonStep scripts\package_release.py --version $packageVersion
 
-Write-Host "  out\\HyperSwitch-$packageVersion-portable.zip"
+Write-Host "Release package:"
+Write-Host "  out\\HyperSwitch-$packageVersion.zip"

@@ -6,7 +6,7 @@ HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS,
 
 HyperSwitch `2.0` is now in alpha and continuing forward after the initial alpha tag.
 
-Current development version: `2.0.0-alpha.2`
+Current development version: `2.0.0-alpha.3`
 
 - Roadmap: `docs/ROADMAP-2.0.md`
 - Current foundation work now includes release polish, metadata/version cleanup, UI copy refinement, dedicated feature modules for Hyper-V, DSE, and VBS, plus separate platform and mitigation modules for the broader read-only security surface.
@@ -18,11 +18,11 @@ Current development version: `2.0.0-alpha.2`
 - Includes Advanced mode for deeper system changes
 - Exports an in-app support bundle with debug output, current state, recent activity, and recovery artifacts
 - Includes a Recovery Center with grouped restore sets, recent rollback backups, support exports, restore commands, and direct backup import actions
-- Can check GitHub Releases, cache release state for support, verify downloaded packages, and self-apply a newer portable build when one is available
-- Lets operators quickly copy a machine summary or open the rollback backup folder
+- Can check GitHub Releases, cache release state for support, verify downloaded packages, and self-apply a newer release ZIP when one is available
+- Lets operators quickly copy a machine summary or open rollback artifacts
 - Persists recent operator activity and remembered mode selection through an in-app Activity Center
 - Supports a debugger build that writes `debugger.txt` for issue reports
-- Packages into a portable Windows `.exe`
+- Ships as a single Windows release ZIP with the app, debug build, docs, assets, and source together
 
 ## Requirements
 
@@ -46,7 +46,7 @@ This creates:
 
 - `dist\HyperSwitch.exe`
 - `dist\HyperSwitchDBG.exe`
-- `out\HyperSwitch-v<version>-portable.zip`
+- `out\HyperSwitch-v<version>.zip`
 
 ## Usage Notes
 
@@ -63,9 +63,9 @@ This creates:
 
 The repo includes a GitHub Actions workflow at `.github/workflows/release.yml`.
 
-- Pushing a tag like `v1.0.2` builds `HyperSwitch.exe`, `HyperSwitchDBG.exe`, and a portable zip bundle
-- The portable zip keeps `HyperSwitch.exe` at the top level and tucks docs, source files, assets, and debug tools into subfolders
-- The workflow uploads the build outputs as workflow artifacts
+- Pushing a tag like `v1.0.2` builds one release ZIP bundle for GitHub Releases
+- The release zip keeps `HyperSwitch.exe` at the top level and tucks docs, source files, assets, and debug tools into subfolders
+- The workflow uploads the release zip as the build artifact
 - Tagged builds are published to GitHub Releases automatically
 
 ## License

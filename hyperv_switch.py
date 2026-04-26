@@ -2805,7 +2805,7 @@ class App(tk.Tk):
                 f"Current build: {probe.current_version}\n"
                 f"Latest release: {release.version}\n"
                 f"Published: {published}\n\n"
-                f"{APP_NAME} can download the portable package, replace the installed files,\n"
+                f"{APP_NAME} can download the release package, replace the installed files,\n"
                 f"and relaunch itself."
             )
 

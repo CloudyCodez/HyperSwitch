@@ -58,7 +58,7 @@ def main() -> None:
     dist_dir = Path(args.dist_dir)
     output_dir = Path(args.output_dir)
     bundle_root = output_dir / f"{APP_NAME}-{version}"
-    zip_base = output_dir / f"{APP_NAME}-{version}-portable"
+    zip_base = output_dir / f"{APP_NAME}-{version}"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if bundle_root.exists():

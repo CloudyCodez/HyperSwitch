@@ -261,7 +261,7 @@ def _fetch_releases() -> list[ReleaseInfo]:
         if not version_key:
             continue
 
-        asset = _portable_asset(item.get("assets", []))
+        asset = _release_zip_asset(item.get("assets", []))
         if not asset:
             continue
 
@@ -280,7 +280,7 @@ def _fetch_releases() -> list[ReleaseInfo]:
     return [release for _, _, release in candidates]
 
 
-def _portable_asset(assets: object) -> ReleaseAsset | None:
+def _release_zip_asset(assets: object) -> ReleaseAsset | None:
     if not isinstance(assets, list):
         return None
 
@@ -293,7 +293,7 @@ def _portable_asset(assets: object) -> ReleaseAsset | None:
         if not name or not url:
             continue
         lower_name = name.lower()
-        if lower_name.startswith(f"{APP_NAME.lower()}-v") and lower_name.endswith("-portable.zip"):
+        if lower_name.startswith(f"{APP_NAME.lower()}-v") and lower_name.endswith(".zip"):
             return ReleaseAsset(
                 name=name,
                 download_url=url,
