@@ -2,6 +2,13 @@
 
 HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS, Driver Signature Enforcement, CPU virtualization state, and a small set of related troubleshooting controls from one place.
 
+## Version 2.0
+
+HyperSwitch `2.0` is now being planned and actively started.
+
+- Roadmap: `docs/ROADMAP-2.0.md`
+- Current foundation work includes release polish, metadata/version cleanup, and internal structure improvements that reduce the path dependence on one very large script.
+
 ## What It Does
 
 - Shows current virtualization and security state in a single desktop app
@@ -25,7 +32,7 @@ python hyperv_switch.py
 ## Build The Executable
 
 ```powershell
-.\build.ps1 -Version 1.0.2
+.\build.ps1
 ```
 
 This creates:

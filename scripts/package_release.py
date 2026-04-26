@@ -1,20 +1,30 @@
 import argparse
 import shutil
+import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from hyperswitch.metadata import APP_NAME, DEBUG_APP_NAME
 
 def copy_file(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
 
 
+def copy_tree(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
 def build_release_tree(root: Path, dist_dir: Path) -> None:
-    copy_file(dist_dir / "HyperSwitch.exe", root / "HyperSwitch.exe")
-    copy_file(dist_dir / "HyperSwitchDBG.exe", root / "debug" / "HyperSwitchDBG.exe")
+    copy_file(dist_dir / f"{APP_NAME}.exe", root / f"{APP_NAME}.exe")
+    copy_file(dist_dir / f"{DEBUG_APP_NAME}.exe", root / "debug" / f"{DEBUG_APP_NAME}.exe")
 
     for source_name, target_name in (
-        ("README.md", "docs/README.md"),
-        ("LICENSE", "docs/LICENSE.txt"),
         ("hyperv_switch.py", "source/hyperv_switch.py"),
         ("requirements.txt", "source/requirements.txt"),
         ("build.ps1", "source/build.ps1"),
@@ -25,6 +35,9 @@ def build_release_tree(root: Path, dist_dir: Path) -> None:
         ("chibi-cloud-watermark.png", "assets/chibi-cloud-watermark.png"),
     ):
         copy_file(Path(source_name), root / target_name)
+    copy_file(Path("README.md"), root / "docs" / "README.md")
+    copy_file(Path("LICENSE"), root / "docs" / "LICENSE.txt")
+    copy_tree(Path("docs"), root / "docs")
 
 
 def main() -> None:
@@ -37,8 +50,8 @@ def main() -> None:
     version = args.version if args.version.startswith("v") else f"v{args.version}"
     dist_dir = Path(args.dist_dir)
     output_dir = Path(args.output_dir)
-    bundle_root = output_dir / f"HyperSwitch-{version}"
-    zip_base = output_dir / f"HyperSwitch-{version}-portable"
+    bundle_root = output_dir / f"{APP_NAME}-{version}"
+    zip_base = output_dir / f"{APP_NAME}-{version}-portable"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if bundle_root.exists():

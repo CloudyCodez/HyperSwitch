@@ -8,13 +8,14 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 
-
-def _resource_path(name: str) -> str:
-    if getattr(sys, "frozen", False):
-        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    else:
-        base = os.path.dirname(__file__)
-    return os.path.join(base, name)
+from hyperswitch.metadata import APP_NAME, APP_VERSION, DEBUG_APP_NAME, ROADMAP_TARGET
+from hyperswitch.runtime import (
+    backup_dir as _backup_dir,
+    debug_report_path as _debug_report_path,
+    is_debug_mode as _is_debug_mode,
+    resource_path as _resource_path,
+    state_file_path as _state_file_path,
+)
 
 
 def _apply_window_icon(window: tk.Tk | tk.Toplevel) -> None:
@@ -36,6 +37,12 @@ def _apply_window_icon(window: tk.Tk | tk.Toplevel) -> None:
 
 
 MASCOT_PATH = _resource_path("chibi-cloud-watermark.png")
+
+
+def _handle_cli_flags() -> None:
+    if "--version" in sys.argv:
+        print(f"{APP_NAME} {APP_VERSION}")
+        raise SystemExit(0)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +226,8 @@ def _relaunch_elevated() -> None:
         _root.destroy()
     except Exception:
         pass
+_handle_cli_flags()
+
 if not _running_as_admin():
     _relaunch_elevated()
 
@@ -396,21 +405,6 @@ _HYPERV_PLATFORM_FEATURES = (
     "Microsoft-Hyper-V-Hypervisor",
     "Microsoft-Hyper-V-Services",
 )
-
-
-def _state_file_path() -> str:
-    root = os.environ.get("ProgramData") or os.environ.get("LOCALAPPDATA") or os.getcwd()
-    folder = os.path.join(root, "HyperSwitch")
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, "state.json")
-
-
-def _backup_dir() -> str:
-    root = os.environ.get("ProgramData") or os.environ.get("LOCALAPPDATA") or os.getcwd()
-    folder = os.path.join(root, "HyperSwitch", "backups")
-    os.makedirs(folder, exist_ok=True)
-    return folder
-
 
 def _timestamp_slug() -> str:
     import datetime
@@ -2366,12 +2360,6 @@ def dma_status() -> tuple[bool | None, bool | None]:
 # ---------------------------------------------------------------------------
 # Debug report
 # ---------------------------------------------------------------------------
-
-def _debug_report_path() -> str:
-    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(__file__)
-    return os.path.join(base, "debugger.txt")
-
-
 def _debug_bool(val: bool | None) -> str:
     if val is None:
         return "UNKNOWN"
@@ -2388,8 +2376,9 @@ def _write_debug_report() -> None:
     _clear_caches()
     lines: list[str] = []
 
-    lines.append("HyperSwitch Debugger Report")
+    lines.append(f"{APP_NAME} Debugger Report")
     lines.append("=" * 38)
+    lines.append(f"Version: {APP_VERSION}")
     lines.append(f"Python: {sys.version}")
     lines.append(f"Executable: {sys.executable}")
     lines.append("")
@@ -2698,12 +2687,6 @@ def _write_debug_report() -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-
-def _is_debug_mode() -> bool:
-    exe = os.path.basename(sys.executable).lower() if getattr(sys, "frozen", False) else ""
-    return ("--debug-report" in sys.argv) or exe.startswith("hyperswitchdbg")
-
-
 def _debug_cmd(label: str, cmd: list[str], timeout_ms: int = 20000) -> str:
     try:
         proc = subprocess.run(
@@ -2751,7 +2734,7 @@ def _msinfo_summary() -> str:
 def _run_debug_gui() -> None:
     try:
         root = tk.Tk()
-        root.title("HyperSwitchDBG")
+        root.title(DEBUG_APP_NAME)
         _apply_window_icon(root)
         root.configure(bg=BG)
         root.resizable(False, False)
@@ -2759,7 +2742,7 @@ def _run_debug_gui() -> None:
 
         tk.Label(
             root,
-            text="HyperSwitch Debugger",
+            text=f"{APP_NAME} Debugger",
             font=MONO_HDR,
             fg=WHITE,
             bg=BG,
@@ -2996,7 +2979,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
 
-        self.title("HyperSwitch")
+        self.title(f"{APP_NAME} {APP_VERSION}")
         _apply_window_icon(self)
         self.configure(bg=BG)
         self.option_add("*Menu.background", PANEL_ALT)
@@ -4462,7 +4445,9 @@ class App(tk.Tk):
 
     def _show_f2_info(self, _event=None) -> None:
         messagebox.showinfo(
-            "HyperSwitch Info",
+            f"{APP_NAME} Info",
+            f"{APP_NAME} {APP_VERSION}\n"
+            f"Roadmap target: {ROADMAP_TARGET}\n\n"
             "This is an open-source utility tool to help troubleshoot any errors "
             "these settings may be causing you.\n\n"
             "This utility is NOT meant to replace VBS, DSE, or any other methods "

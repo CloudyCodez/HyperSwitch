@@ -1,10 +1,20 @@
 param(
-    [string]$Version = "dev"
+    [string]$Version = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-$packageVersion = if ($Version -like "v*") { $Version } else { "v$Version" }
+function Invoke-PythonStep {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Args
+    )
+
+    & $python @Args
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python command failed: $($Args -join ' ')"
+    }
+}
 
 $pythonCandidates = @(
     "C:\Users\conno\AppData\Local\Python\bin\python.exe",
@@ -18,10 +28,19 @@ if (-not $python) {
     throw "Python was not found. Install Python 3 and ensure python or py is available."
 }
 
-& $python -m pip install -r requirements.txt
-& $python generate_icon.py
+if (-not $Version) {
+    $Version = (& $python -c "from hyperswitch.metadata import APP_VERSION; print(APP_VERSION)").Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to read APP_VERSION from hyperswitch.metadata"
+    }
+}
 
-& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+$packageVersion = if ($Version -like "v*") { $Version } else { "v$Version" }
+
+Invoke-PythonStep -m pip install -r requirements.txt
+Invoke-PythonStep generate_icon.py
+
+Invoke-PythonStep -m PyInstaller --noconfirm --clean --onefile --windowed `
     --add-data "hyperswitch.ico;." `
     --add-data "hyperswitch.png;." `
     --add-data "chibi-cloud-watermark.png;." `
@@ -29,7 +48,7 @@ if (-not $python) {
     --name HyperSwitch `
     hyperv_switch.py
 
-& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+Invoke-PythonStep -m PyInstaller --noconfirm --clean --onefile --windowed `
     --add-data "hyperswitch.ico;." `
     --add-data "hyperswitch.png;." `
     --add-data "chibi-cloud-watermark.png;." `
@@ -42,6 +61,6 @@ Write-Host "Build complete:"
 Write-Host "  dist\\HyperSwitch.exe"
 Write-Host "  dist\\HyperSwitchDBG.exe"
 
-& $python scripts\package_release.py --version $packageVersion
+Invoke-PythonStep scripts\package_release.py --version $packageVersion
 
 Write-Host "  out\\HyperSwitch-$packageVersion-portable.zip"

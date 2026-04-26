@@ -30,6 +30,18 @@ jobs:
         shell: pwsh
         run: python generate_icon.py
 
+      - name: Validate Version Metadata
+        shell: pwsh
+        run: |
+          $appVersion = python -c "from hyperswitch.metadata import APP_VERSION; print(APP_VERSION)"
+          $appVersion = $appVersion.Trim()
+          if ('${{ github.ref_type }}' -eq 'tag') {
+            $tagVersion = '${{ github.ref_name }}'.TrimStart('v')
+            if ($appVersion -ne $tagVersion) {
+              throw "Tag version $tagVersion does not match hyperswitch.metadata APP_VERSION $appVersion"
+            }
+          }
+
       - name: Build Release Executable
         shell: pwsh
         run: |
