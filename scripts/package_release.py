@@ -17,7 +17,12 @@ def copy_file(source: Path, destination: Path) -> None:
 def copy_tree(source: Path, destination: Path) -> None:
     if not source.exists():
         return
-    shutil.copytree(source, destination, dirs_exist_ok=True)
+    shutil.copytree(
+        source,
+        destination,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
 
 
 def build_release_tree(root: Path, dist_dir: Path) -> None:
@@ -38,6 +43,8 @@ def build_release_tree(root: Path, dist_dir: Path) -> None:
     copy_file(Path("README.md"), root / "docs" / "README.md")
     copy_file(Path("LICENSE"), root / "docs" / "LICENSE.txt")
     copy_tree(Path("docs"), root / "docs")
+    copy_tree(Path("hyperswitch"), root / "source" / "hyperswitch")
+    copy_tree(Path("scripts"), root / "source" / "scripts")
 
 
 def main() -> None:

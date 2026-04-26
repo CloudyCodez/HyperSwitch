@@ -8,7 +8,47 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 
+from hyperswitch.bcd import (
+    all_entries as _bcdedit_all_entries,
+    clear_bcd_cache,
+    current_entry as _bcdedit_current_entry,
+    export_backup as _export_bcd_backup,
+    format_bcdedit_failure as _format_bcdedit_failure_raw,
+    read_key_value as _bcd_key_value,
+    read_value as _read_bcd_value,
+    run_bcdedit as _bcdedit,
+    set_boot_value as _bcdedit_set_boot_value_raw,
+    status_error_title as _status_error_title,
+)
 from hyperswitch.metadata import APP_NAME, APP_VERSION, DEBUG_APP_NAME, ROADMAP_TARGET
+from hyperswitch.queries import (
+    bitlocker_protection_on as _bitlocker_protection_on,
+    clear_query_caches,
+    credential_guard_status as _credential_guard_status,
+    device_guard_has_value as _device_guard_has_value,
+    dism_feature_state as _dism_feature_state,
+    get_cpu_vendor as _get_cpu_vendor,
+    hello_csp_state as _hello_csp_state,
+    is_amd_fx_cpu as _is_amd_fx_cpu,
+    parse_bool_text as _parse_bool_text,
+    platform_value as _platform_value,
+    powershell_bool as _powershell_bool,
+    powershell_value as _powershell_value,
+    prime_device_guard_cache as _prime_device_guard_cache,
+    prime_platform_cache as _prime_platform_cache,
+    prime_processor_cache as _prime_processor_cache,
+    query_cpu_registry_value as _query_cpu_registry_value,
+    query_kernel_ci_options as _query_kernel_ci_options,
+    query_processor_value as _query_processor_value,
+    query_wmi_device_guard as _query_wmi_device_guard,
+    query_wmi_device_guard_list as _query_wmi_device_guard_list,
+    read_registry_dword as _read_registry_dword,
+    read_registry_text as _read_registry_text,
+    service_is_running as _service_is_running,
+    windows_hello_present as _windows_hello_present,
+    windows_hello_status as _windows_hello_status,
+    wmic_property_value as _wmic_property_value,
+)
 from hyperswitch.runtime import (
     backup_dir as _backup_dir,
     debug_report_path as _debug_report_path,
@@ -16,24 +56,28 @@ from hyperswitch.runtime import (
     resource_path as _resource_path,
     state_file_path as _state_file_path,
 )
-
-
-def _apply_window_icon(window: tk.Tk | tk.Toplevel) -> None:
-    png_path = _resource_path("hyperswitch.png")
-    ico_path = _resource_path("hyperswitch.ico")
-
-    try:
-        if os.path.exists(png_path):
-            window._hyper_switch_icon = tk.PhotoImage(file=png_path)
-            window.iconphoto(True, window._hyper_switch_icon)
-    except Exception:
-        pass
-
-    try:
-        if os.path.exists(ico_path):
-            window.iconbitmap(ico_path)
-    except Exception:
-        pass
+from hyperswitch.ui import (
+    ACCENT,
+    AMBER,
+    BG,
+    BLUE,
+    BORDER,
+    CARD_EDGE,
+    DIM,
+    GRID,
+    GREEN,
+    MONO_HDR,
+    MONO_LG,
+    MONO_SM,
+    MUTED,
+    PANEL,
+    PANEL_ALT,
+    RED,
+    ROSE,
+    ToggleRow as _ToggleRow,
+    WHITE,
+    apply_window_icon as _apply_window_icon,
+)
 
 
 MASCOT_PATH = _resource_path("chibi-cloud-watermark.png")
@@ -236,29 +280,6 @@ if not _running_as_admin():
 # bcdedit interface
 # ---------------------------------------------------------------------------
 
-def _bcdedit(*args: str) -> tuple[bool, str]:
-    try:
-        proc = subprocess.run(
-            ["bcdedit", *args],
-            capture_output=True,
-            text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
-    except FileNotFoundError:
-        return False, "bcdedit not found -- is this a Windows system?"
-    except OSError as exc:
-        return False, str(exc)
-
-
-def _bcdedit_cached(cache_key: str, *args: str) -> tuple[bool, str]:
-    if cache_key in _BCD_CACHE:
-        return _BCD_CACHE[cache_key]
-    ok, out = _bcdedit(*args)
-    _BCD_CACHE[cache_key] = (ok, out)
-    return ok, out
-
-
 def _secure_boot_enabled() -> bool | None:
     reg_val = _read_registry_dword(
         None,
@@ -293,108 +314,12 @@ def _secure_boot_enabled() -> bool | None:
     return None
 
 
-def _format_bcdedit_failure(setting: str, value: str, raw_output: str) -> str:
-    detail = (raw_output or "").strip() or "Unknown bcdedit error."
-    low = detail.lower()
-    blocked_by_secure_boot = "secure boot" in low
-    missing_entry = False
-
-    if not blocked_by_secure_boot:
-        if "access is denied" in low or "cannot be modified" in low or "protected" in low:
-            blocked_by_secure_boot = _secure_boot_enabled() is True
-
-    if (
-        "entry specified" in low
-        or "element not found" in low
-        or "cannot find the file specified" in low
-        or "arquivo especificado" in low
-        or "entrada especificada" in low
-    ):
-        missing_entry = True
-
-    if blocked_by_secure_boot:
-        return (
-            f"{setting}={value} failed.\n\n"
-            "Secure Boot is blocking this boot setting from being changed.\n"
-            "Disable Secure Boot in BIOS/UEFI, then run HyperSwitch again.\n\n"
-            f"bcdedit: {detail}"
-        )
-
-    if missing_entry:
-        return (
-            f"{setting}={value} failed.\n\n"
-            "Windows could not resolve the target boot entry in the BCD store.\n"
-            "This usually means the machine is using a different loader alias than the default one.\n\n"
-            f"bcdedit: {detail}"
-        )
-
-    return f"{setting}={value} failed.\n\nbcdedit: {detail}"
-
-
-def _split_status_detail(message: str) -> tuple[str, str]:
-    if "\n\n" not in message:
-        return message, ""
-    summary, detail = message.split("\n\n", 1)
-    return summary.strip(), detail.strip()
-
-
-def _status_error_title(message: str, fallback: str) -> str:
-    if "Secure Boot is blocking this boot setting" in message:
-        return "Secure Boot blocked boot configuration change"
-    if "could not resolve the target boot entry" in message:
-        return "Boot configuration entry not found"
-    return fallback
-
-
-def _bcdedit_current_entry() -> tuple[bool, str, str]:
-    ok, out = _bcdedit_cached("bcd_current", "/enum", "{current}")
-    if ok and out:
-        return True, out, "{current}"
-    return False, "", "{current}"
-
-
-_BCD_ALLOWED_VALUES: dict[str, tuple[str, ...]] = {
-    "hypervisorlaunchtype": ("auto", "off"),
-    "testsigning": ("yes", "no"),
-    "nointegritychecks": ("yes", "no"),
-    "vsmlaunchtype": ("auto", "off"),
-}
-
-
 def _bcdedit_set_boot_value(key: str, value: str) -> tuple[bool, str]:
-    key_norm = (key or "").strip().lower()
-    value_norm = (value or "").strip().lower()
-
-    allowed = _BCD_ALLOWED_VALUES.get(key_norm)
-    if not allowed:
-        return False, f"Refusing to set unsupported BCD key: {key}"
-    if value_norm not in allowed:
-        return False, f"Refusing to set unsupported value for {key_norm}: {value}"
-
-    pending = _pending_reboot_reasons()
-    if pending:
-        return False, (
-            "Refusing to change boot configuration while Windows has a pending reboot state: "
-            + ", ".join(pending)
-        )
-
-    ok_entry, _, token = _bcdedit_current_entry()
-    if not ok_entry:
-        return False, "Could not resolve the current boot entry in the BCD store."
-
-    return _bcdedit("/set", token, key_norm, value_norm)
+    return _bcdedit_set_boot_value_raw(key, value, _pending_reboot_reasons())
 
 
-def _read_bcd_value(key: str) -> str | None:
-    ok, output, _ = _bcdedit_current_entry()
-    if not ok:
-        return None
-    for line in output.splitlines():
-        stripped = line.strip()
-        if stripped.lower().startswith(key.lower()):
-            parts = stripped.split(None, 1)
-            return parts[1].strip().lower() if len(parts) == 2 else ""
-    return None
+def _format_bcdedit_failure(setting: str, value: str, raw_output: str) -> str:
+    return _format_bcdedit_failure_raw(setting, value, raw_output, _secure_boot_enabled())
 
 
 _HYPERV_PLATFORM_FEATURES = (
@@ -611,42 +536,6 @@ def hyperv_set(active: bool) -> tuple[bool, str]:
     if details:
         message += "\n\n" + "\n\n".join(details)
     return ok_launch, message
-
-
-def _query_kernel_ci_options() -> int | None:
-    global _CI_CACHE
-    if _CI_CACHE is not _CACHE_MISS:
-        return _CI_CACHE
-
-    try:
-        import ctypes
-        import ctypes.wintypes
-
-        class SYSTEM_CODEINTEGRITY_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("Length",               ctypes.wintypes.ULONG),
-                ("CodeIntegrityOptions", ctypes.wintypes.ULONG),
-            ]
-
-        SystemCodeIntegrityInformation = 103
-        info = SYSTEM_CODEINTEGRITY_INFORMATION()
-        info.Length = ctypes.sizeof(info)
-        return_length = ctypes.wintypes.ULONG(0)
-
-        status = ctypes.windll.ntdll.NtQuerySystemInformation(
-            SystemCodeIntegrityInformation,
-            ctypes.byref(info),
-            ctypes.sizeof(info),
-            ctypes.byref(return_length),
-        )
-        if status == 0:
-            _CI_CACHE = info.CodeIntegrityOptions
-            return _CI_CACHE
-        _CI_CACHE = None
-        return None
-    except Exception:
-        _CI_CACHE = None
-        return None
 
 
 def _dse_partial_enforcement() -> list[str]:
@@ -963,378 +852,9 @@ _KSHADOW_PATH = (
 )
 
 
-def _read_registry_dword(hive, path: str, value: str) -> int | None:
-    cache_key = (path, value)
-    if cache_key in _REG_CACHE:
-        return _REG_CACHE[cache_key]
-
-    # Path 1: Python winreg -- fast and locale-safe
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            path,
-            0,
-            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
-        )
-        val, _ = winreg.QueryValueEx(key, value)
-        winreg.CloseKey(key)
-        result = val if isinstance(val, int) else None
-        _REG_CACHE[cache_key] = result
-        return result
-    except Exception:
-        pass
-
-    # Path 2: reg.exe subprocess
-    try:
-        proc = subprocess.run(
-            ["reg", "query", f"HKLM\\{path}", "/v", value],
-            capture_output=True, text=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if proc.returncode == 0:
-            for line in proc.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 3 and parts[0].lower() == value.lower():
-                    try:
-                        result = int(parts[-1], 16)
-                        _REG_CACHE[cache_key] = result
-                        return result
-                    except ValueError:
-                        pass
-    except Exception:
-        pass
-
-    _REG_CACHE[cache_key] = None
-    return None
-
-
-def _read_registry_text(hive, path: str, value: str) -> str:
-    hive_name = "HKLM" if hive is None else str(hive)
-    try:
-        proc = subprocess.run(
-            ["reg", "query", f"{hive_name}\\{path}", "/v", value],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if proc.returncode == 0:
-            raw = proc.stdout.decode("utf-8-sig", errors="replace")
-            for line in raw.splitlines():
-                parts = line.split()
-                if len(parts) >= 4 and parts[0].lower() == value.lower():
-                    return " ".join(parts[2:]).split(None, 1)[-1].strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _get_cpu_vendor() -> str:
-    global _CPU_VENDOR_CACHE, _CPU_VENDOR_PRIMED
-    if _CPU_VENDOR_PRIMED:
-        return _CPU_VENDOR_CACHE or "unknown"
-
-    manufacturer = _query_processor_value("Manufacturer")
-    if manufacturer:
-        raw = manufacturer.lower()
-        if "intel" in raw or "genuineintel" in raw:
-            _CPU_VENDOR_CACHE = "intel"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-        if "amd" in raw or "authenticamd" in raw:
-            _CPU_VENDOR_CACHE = "amd"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-
-    # Path 1: winreg hardware description (written at boot from CPUID)
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-            0, winreg.KEY_READ,
-        )
-        vendor, _ = winreg.QueryValueEx(key, "VendorIdentifier")
-        winreg.CloseKey(key)
-        v = str(vendor).lower()
-        if "genuineintel" in v:
-            _CPU_VENDOR_CACHE = "intel"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-        if "authenticamd" in v or "amd" in v:
-            _CPU_VENDOR_CACHE = "amd"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-    except Exception:
-        pass
-
-    # Path 2: WMIC
-    try:
-        proc = subprocess.run(
-            ["wmic", "cpu", "get", "Manufacturer", "/value"],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        raw = proc.stdout.decode("utf-8-sig", errors="replace").lower()
-        if "intel" in raw:
-            _CPU_VENDOR_CACHE = "intel"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-        if "amd" in raw:
-            _CPU_VENDOR_CACHE = "amd"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-    except Exception:
-        pass
-
-    cpu_name = _query_cpu_registry_value("ProcessorNameString")
-    if cpu_name:
-        raw = cpu_name.lower()
-        if "intel" in raw:
-            _CPU_VENDOR_CACHE = "intel"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-        if "amd" in raw or "fx-" in raw or "ryzen" in raw:
-            _CPU_VENDOR_CACHE = "amd"
-            _CPU_VENDOR_PRIMED = True
-            return _CPU_VENDOR_CACHE
-
-    _CPU_VENDOR_CACHE = "unknown"
-    _CPU_VENDOR_PRIMED = True
-    return _CPU_VENDOR_CACHE
-
-
-def _is_amd_fx_cpu() -> bool:
-    cpu_name = (_query_cpu_registry_value("ProcessorNameString") or "").lower()
-    if "amd fx" in cpu_name or "fx-" in cpu_name or "fx(tm)" in cpu_name:
-        return True
-
-    identifier = (_query_cpu_registry_value("Identifier") or "").lower()
-    if _get_cpu_vendor() == "amd" and "family 21" in identifier:
-        return True
-
-    cim_name = (_query_processor_value("Name") or "").lower()
-    if "amd fx" in cim_name or "fx-" in cim_name or "fx(tm)" in cim_name:
-        return True
-
-    return False
-_CACHE_MISS = object()
-_PS_CACHE: dict[str, str] = {}
-_WMI_DG_CACHE: dict[str, object] = {}
-_REG_CACHE: dict[tuple[str, str], int | None] = {}
-_BCD_CACHE: dict[str, tuple[bool, str]] = {}
-_SERVICE_CACHE: dict[str, bool | None] = {}
-_DISM_CACHE: dict[str, str | None] = {}
-_PROC_CACHE: dict[str, str] = {}
-_PLATFORM_CACHE: dict[str, str] = {}
-_PROC_PRIMED = False
-_WMI_DG_PRIMED = False
-_PLATFORM_PRIMED = False
-_CPU_VENDOR_CACHE: str | None = None
-_CPU_VENDOR_PRIMED = False
-_CI_CACHE: int | None | object = _CACHE_MISS
-_WMI_DG_ARRAY_PROPS = {
-    "AvailableSecurityProperties",
-    "RequiredSecurityProperties",
-    "SecurityServicesConfigured",
-    "SecurityServicesRunning",
-    "VirtualMachineIsolationProperties",
-}
-
-
-def _powershell_value(command: str) -> str:
-    if command in _PS_CACHE:
-        return _PS_CACHE[command]
-    try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-        result = lines[0] if lines else ""
-        _PS_CACHE[command] = result
-        return result
-    except Exception:
-        _PS_CACHE[command] = ""
-        return ""
-
-
-def _powershell_bool(command: str) -> bool | None:
-    val = _powershell_value(command).strip().lower()
-    if val in ("true", "1"):
-        return True
-    if val in ("false", "0"):
-        return False
-    return None
-
-
-def _parse_bool_text(raw: str) -> bool | None:
-    raw = raw.strip().lower()
-    if raw in ("true", "1", "yes"):
-        return True
-    if raw in ("false", "0", "no"):
-        return False
-    return None
-
-
-def _parse_int_list(raw: str) -> tuple[int, ...] | None:
-    if not raw:
-        return None
-    numbers = [int(part) for part in re.findall(r"\d+", raw)]
-    if not numbers:
-        return None
-    return tuple(numbers)
-
-
-def _prime_processor_cache() -> None:
-    global _PROC_PRIMED
-    if _PROC_PRIMED:
-        return
-    props = (
-        "Manufacturer",
-        "Name",
-        "ProcessorId",
-        "Caption",
-        "Description",
-        "VirtualizationFirmwareEnabled",
-        "VMMonitorModeExtensions",
-        "SecondLevelAddressTranslationExtensions",
-    )
-    try:
-        ps_lines = "; ".join(
-            [f"'{p}=' + [string]$cpu.{p}" for p in props]
-        )
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "$cpu=Get-CimInstance -ClassName Win32_Processor -EA SilentlyContinue | Select-Object -First 1; "
-                f"if ($null -eq $cpu) {{ '' }} else {{ {ps_lines} }}",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        for line in proc.stdout.splitlines():
-            if "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            _PROC_CACHE[key.strip()] = val.strip()
-    except Exception:
-        pass
-    _PROC_PRIMED = True
-
-
-def _query_processor_value(property_name: str) -> str:
-    _prime_processor_cache()
-    if property_name in _PROC_CACHE:
-        return _PROC_CACHE[property_name]
-    return ""
-
-
-def _query_cpu_registry_value(value_name: str) -> str:
-    try:
-        import winreg
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-            0,
-            winreg.KEY_READ,
-        )
-        value, _ = winreg.QueryValueEx(key, value_name)
-        winreg.CloseKey(key)
-        return str(value).strip()
-    except Exception:
-        return ""
-
-
-def _prime_platform_cache() -> None:
-    global _PLATFORM_PRIMED
-    if _PLATFORM_PRIMED:
-        return
-    try:
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "$ci=Get-ComputerInfo -EA SilentlyContinue; "
-                "if ($null -ne $ci) { "
-                "'WindowsEditionId=' + [string]$ci.WindowsEditionId; "
-                "'BiosFirmwareType=' + [string]$ci.BiosFirmwareType; "
-                "'HyperVRequirementVirtualizationFirmwareEnabled=' + [string]$ci.HyperVRequirementVirtualizationFirmwareEnabled; "
-                "'HyperVRequirementSecondLevelAddressTranslation=' + [string]$ci.HyperVRequirementSecondLevelAddressTranslation; "
-                "'HyperVRequirementDataExecutionPreventionAvailable=' + [string]$ci.HyperVRequirementDataExecutionPreventionAvailable; "
-                "'HyperVRequirementVMMonitorModeExtensions=' + [string]$ci.HyperVRequirementVMMonitorModeExtensions "
-                "}; "
-                "try { "
-                "$sb = Confirm-SecureBootUEFI; "
-                "'SecureBootEnabled=' + [string]$sb "
-                "} catch { '' }; "
-                "try { "
-                "$t = Get-Tpm -EA Stop; "
-                "if ($null -ne $t) { "
-                "'TpmPresent=' + [string]$t.TpmPresent; "
-                "'TpmReady=' + [string]$t.TpmReady; "
-                "'TpmSpecVersion=' + [string]$t.SpecVersion "
-                "} "
-                "} catch { '' }",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        for line in proc.stdout.splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            _PLATFORM_CACHE[key.strip()] = value.strip()
-    except Exception:
-        pass
-    _PLATFORM_PRIMED = True
-
-
-def _platform_value(name: str) -> str:
-    _prime_platform_cache()
-    return _PLATFORM_CACHE.get(name, "")
-
-
-def _wmic_property_value(wmi_class: str, property_name: str) -> str:
-    try:
-        try:
-            proc = subprocess.run(
-                ["wmic"] + wmi_class.split() + ["get", property_name, "/value"],
-                capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            for encoding in ("utf-16-le", "utf-8-sig", "utf-8", "latin-1"):
-                try:
-                    raw = proc.stdout.decode(encoding, errors="replace")
-                    for line in raw.splitlines():
-                        line = line.strip()
-                        if "=" in line and property_name.lower() in line.lower():
-                            return line.split("=", 1)[-1].strip()
-                    break
-                except Exception:
-                    continue
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return ""
-
-
 def _clear_caches() -> None:
-    global _PROC_PRIMED, _WMI_DG_PRIMED, _PLATFORM_PRIMED, _CPU_VENDOR_CACHE, _CPU_VENDOR_PRIMED, _CI_CACHE
-    _PS_CACHE.clear()
-    _WMI_DG_CACHE.clear()
-    _REG_CACHE.clear()
-    _BCD_CACHE.clear()
-    _SERVICE_CACHE.clear()
-    _DISM_CACHE.clear()
-    _PROC_CACHE.clear()
-    _PLATFORM_CACHE.clear()
-    _PROC_PRIMED = False
-    _WMI_DG_PRIMED = False
-    _PLATFORM_PRIMED = False
-    _CPU_VENDOR_CACHE = None
-    _CPU_VENDOR_PRIMED = False
-    _CI_CACHE = _CACHE_MISS
+    clear_query_caches()
+    clear_bcd_cache()
 
 
 def _collect_basic_snapshot() -> dict:
@@ -1368,348 +888,17 @@ def _collect_advanced_snapshot() -> dict:
     }
 
 
-def _service_is_running(service_name: str) -> bool:
-    if service_name in _SERVICE_CACHE:
-        cached = _SERVICE_CACHE[service_name]
-        return bool(cached)
-
-    try:
-        quoted = "','".join(("HvHost", "vmms", "HvSocket", "vmcompute"))
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                f"Get-Service -Name '{quoted}' -EA SilentlyContinue | "
-                "ForEach-Object { $_.Name + '=' + $_.Status.value__ }",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        for line in proc.stdout.splitlines():
-            if "=" not in line:
-                continue
-            name, val = line.split("=", 1)
-            name = name.strip()
-            val = val.strip()
-            if val.isdigit():
-                _SERVICE_CACHE[name] = (int(val) == 4)
-    except Exception:
-        pass
-
-    if service_name in _SERVICE_CACHE:
-        return bool(_SERVICE_CACHE[service_name])
-
-    try:
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                f"(Get-Service -Name '{service_name}' -ErrorAction SilentlyContinue).Status.value__",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        val = proc.stdout.strip()
-        if val.isdigit():
-            result = (int(val) == 4)
-            _SERVICE_CACHE[service_name] = result
-            return result
-    except Exception:
-        pass
-
-    try:
-        proc = subprocess.run(
-            ["sc", "queryex", service_name],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        raw = proc.stdout.decode("utf-8", errors="replace") + \
-              proc.stdout.decode("latin-1", errors="replace")
-        for line in raw.splitlines():
-            if "STATE" in line.upper():
-                parts = line.split(":")
-                if len(parts) >= 2:
-                    nums = [p.strip() for p in parts[1].split() if p.strip().isdigit()]
-                    if nums and int(nums[0]) == 4:
-                        _SERVICE_CACHE[service_name] = True
-                        return True
-    except Exception:
-        pass
-
-    _SERVICE_CACHE[service_name] = False
-    return False
-
-
-def _bitlocker_protection_on() -> bool | None:
-    val = _powershell_value(
-        "try { "
-        "$v = Get-BitLockerVolume -MountPoint $env:SystemDrive -EA Stop; "
-        "if ($null -eq $v) { '' } else { [string]$v.ProtectionStatus } "
-        "} catch { '' }"
-    )
-    if val.isdigit():
-        return int(val) == 1
-    val = _powershell_value(
-        "try { "
-        "$vol = Get-CimInstance -Namespace 'Root/CIMV2/Security/MicrosoftVolumeEncryption' "
-        "-ClassName Win32_EncryptableVolume -EA Stop | "
-        "Where-Object { $_.DriveLetter -eq $env:SystemDrive } | Select-Object -First 1; "
-        "if ($null -eq $vol) { '' } else { "
-        "$r = Invoke-CimMethod -InputObject $vol -MethodName GetProtectionStatus -EA Stop; "
-        "[string]$r.ProtectionStatus } "
-        "} catch { '' }"
-    )
-    if val.isdigit():
-        return int(val) == 1
-    return None
-
-
-def _windows_hello_present() -> bool | None:
-    if _service_is_running("NgcCtnrSvc") or _service_is_running("NgcSvc"):
-        return True
-    ngc_path = os.path.join(
-        os.environ.get("WINDIR", r"C:\\Windows"),
-        "ServiceProfiles",
-        "LocalService",
-        "AppData",
-        "Local",
-        "Microsoft",
-        "Ngc",
-    )
-    try:
-        if os.path.isdir(ngc_path):
-            with os.scandir(ngc_path) as entries:
-                for _ in entries:
-                    return True
-            return False
-    except Exception:
-        pass
-    return None
-
-
-def _credential_guard_configured() -> bool | None:
-    val = _read_registry_dword(None, _VBS_POLICY_PATH, "LsaCfgFlags")
-    if val is not None:
-        return val != 0
-    configured = _query_wmi_device_guard_list("SecurityServicesConfigured")
-    if configured is not None:
-        return 1 in configured
-    return None
-
-
-def _credential_guard_running() -> bool | None:
-    running = _query_wmi_device_guard_list("SecurityServicesRunning")
-    if running is not None:
-        return 1 in running
-    val = _powershell_bool(
-        "try { "
-        "$dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\\Microsoft\\Windows\\DeviceGuard -EA Stop; "
-        "if ($null -eq $dg) { '' } else { [string]($dg.SecurityServicesRunning -contains 1) } "
-        "} catch { '' }"
-    )
-    if val is not None:
-        return val
-    return None
-
-
-def credential_guard_status() -> tuple[bool | None, bool | None]:
-    runtime = _credential_guard_running()
-    configured = _credential_guard_configured()
-    if runtime is None:
-        lsa = _read_registry_dword(None, _VBS_POLICY_PATH, "LsaCfgFlags")
-        if lsa is not None:
-            runtime = lsa != 0
-    return runtime, configured
-
-
 _HELLO_GPO_PATH = r"SOFTWARE\Policies\Microsoft\PassportForWork"
 _HELLO_GPO_VALUE = "Enabled"
 _HELLO_CSP_ROOT = r"SOFTWARE\Microsoft\Policies\PassportForWork"
 
 
-def _hello_csp_state() -> tuple[bool | None, str]:
-    try:
-        import winreg
-        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _HELLO_CSP_ROOT, 0, winreg.KEY_READ)
-        states: list[int] = []
-        conflict_labels: list[str] = []
-        subkeys, _, _ = winreg.QueryInfoKey(root)
-        for i in range(subkeys):
-            tenant = winreg.EnumKey(root, i)
-            for suffix, label in (("Device\\Policies", f"{tenant} device"), ("UserSid\\Policies", f"{tenant} user")):
-                path = f"{_HELLO_CSP_ROOT}\\{tenant}\\{suffix}"
-                try:
-                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ)
-                    value, _ = winreg.QueryValueEx(key, "UsePassportForWork")
-                    winreg.CloseKey(key)
-                    if isinstance(value, int):
-                        states.append(value)
-                        conflict_labels.append(label)
-                except Exception:
-                    pass
-        winreg.CloseKey(root)
-        if 0 in states:
-            return False, ", ".join(conflict_labels)
-        if 1 in states:
-            return True, ", ".join(conflict_labels)
-    except Exception:
-        pass
-    return None, ""
+def credential_guard_status() -> tuple[bool | None, bool | None]:
+    return _credential_guard_status(_VBS_POLICY_PATH)
 
 
 def windows_hello_status() -> tuple[bool | None, str]:
-    gpo_val = _read_registry_dword(None, _HELLO_GPO_PATH, _HELLO_GPO_VALUE)
-    csp_val, csp_label = _hello_csp_state()
-    post_logon = _read_registry_dword(None, _HELLO_GPO_PATH, "DisablePostLogonProvisioning")
-
-    notes: list[str] = []
-    if gpo_val is not None:
-        notes.append(f"GPO={gpo_val}")
-    if post_logon is not None:
-        notes.append(f"PostLogon={post_logon}")
-    if csp_label:
-        notes.append(f"CSP={csp_label}")
-
-    if gpo_val == 0:
-        return False, " | ".join(notes) if notes else "GPO disable"
-    if gpo_val == 1:
-        return True, " | ".join(notes) if notes else "GPO enable"
-    if post_logon == 1:
-        return False, " | ".join(notes) if notes else "Post-logon provisioning disabled"
-    if csp_val is False:
-        return False, " | ".join(notes) if notes else "CSP disable"
-    if csp_val is True:
-        return True, " | ".join(notes) if notes else "CSP enable"
-    return True, "Not configured - provisioning allowed"
-
-
-def _bcdedit_all_entries() -> str:
-    parts = []
-    for args in (["{current}"], ["all"]):
-        cache_key = "bcd_current" if args == ["{current}"] else "bcd_all"
-        ok, out = _bcdedit_cached(cache_key, "/enum", *args)
-        if ok and out:
-            parts.append(out)
-    return "\n".join(parts)
-
-
-def _bcd_key_value(output: str, key: str) -> str | None:
-    for line in output.splitlines():
-        stripped = line.strip()
-        low = stripped.lower()
-        if low.startswith(key.lower()):
-            parts = stripped.split(None, 1)
-            return parts[1].strip().lower() if len(parts) == 2 else ""
-    return None
-
-
-def _query_wmi_device_guard(property_name: str) -> int | None:
-    _prime_device_guard_cache()
-    cached = _WMI_DG_CACHE.get(property_name, _CACHE_MISS)
-    if isinstance(cached, int) or cached is None:
-        return cached
-    if isinstance(cached, tuple):
-        return cached[0] if len(cached) == 1 else None
-    try:
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                f"$v=(Get-CimInstance -ClassName Win32_DeviceGuard "
-                f"-Namespace root\\Microsoft\\Windows\\DeviceGuard -EA SilentlyContinue).{property_name}; "
-                "if ($null -eq $v) { '' } else { [string]$v }",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        val = proc.stdout.strip().splitlines()[0].strip() if proc.stdout.strip() else ""
-        result = int(val) if val.isdigit() else None
-        _WMI_DG_CACHE[property_name] = result
-        return result
-    except Exception:
-        _WMI_DG_CACHE[property_name] = None
-        return None
-
-
-def _query_wmi_device_guard_list(property_name: str) -> tuple[int, ...] | None:
-    _prime_device_guard_cache()
-    cached = _WMI_DG_CACHE.get(property_name, _CACHE_MISS)
-    if isinstance(cached, tuple):
-        return cached
-    if isinstance(cached, int):
-        return (cached,)
-    if cached is None:
-        return None
-    try:
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                f"$v=(Get-CimInstance -ClassName Win32_DeviceGuard "
-                f"-Namespace root\\Microsoft\\Windows\\DeviceGuard -EA SilentlyContinue).{property_name}; "
-                "if ($null -eq $v) { '' } else { (@($v) | ForEach-Object { [string]$_ }) -join ',' }",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        result = _parse_int_list(proc.stdout.strip())
-        _WMI_DG_CACHE[property_name] = result
-        return result
-    except Exception:
-        _WMI_DG_CACHE[property_name] = None
-        return None
-
-
-def _device_guard_has_value(property_name: str, expected: int) -> bool | None:
-    values = _query_wmi_device_guard_list(property_name)
-    if values is None:
-        return None
-    return expected in values
-
-
-def _prime_device_guard_cache() -> None:
-    global _WMI_DG_PRIMED
-    if _WMI_DG_PRIMED:
-        return
-    props = [
-        "VirtualizationBasedSecurityStatus",
-        "SecurityServicesRunning",
-        "SecurityServicesConfigured",
-        "HyperVisorEnforcedCodeIntegrityStatus",
-        "AvailableSecurityProperties",
-        "RequiredSecurityProperties",
-        "KernelDmaProtectionEnabled",
-        "CodeIntegrityPolicyEnforcementStatus",
-    ]
-    try:
-        ps_parts = []
-        for prop in props:
-            if prop in _WMI_DG_ARRAY_PROPS:
-                ps_parts.append(
-                    f"'{prop}=' + ((@($dg.{prop}) | ForEach-Object {{ [string]$_ }}) -join ',')"
-                )
-            else:
-                ps_parts.append(f"'{prop}=' + [string]$dg.{prop}")
-        ps_lines = "; ".join(ps_parts)
-        proc = subprocess.run(
-            [
-                "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                f"$dg=Get-CimInstance -ClassName Win32_DeviceGuard "
-                f"-Namespace root\\Microsoft\\Windows\\DeviceGuard; "
-                f"if ($null -eq $dg) {{ '' }} else {{ {ps_lines} }}",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        for line in proc.stdout.splitlines():
-            if "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            key = key.strip()
-            val = val.strip()
-            if key in _WMI_DG_ARRAY_PROPS:
-                _WMI_DG_CACHE[key] = _parse_int_list(val)
-            else:
-                _WMI_DG_CACHE[key] = int(val) if val.isdigit() else None
-    except Exception:
-        pass
-    _WMI_DG_PRIMED = True
+    return _windows_hello_status(_HELLO_GPO_PATH, _HELLO_GPO_VALUE, _HELLO_CSP_ROOT)
 
 
 def vbs_is_active() -> bool | None:
@@ -2785,187 +1974,10 @@ def schedule_reboot(delay_seconds: int = 5) -> None:
         [
             "shutdown", "/r",
             "/t", str(delay_seconds),
-            "/c", f"HyperV Switch: restarting in {delay_seconds}\u00a0seconds",
+            "/c", f"{APP_NAME}: restarting in {delay_seconds} seconds",
         ],
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
-
-
-# ---------------------------------------------------------------------------
-# Palette and type constants
-# ---------------------------------------------------------------------------
-
-BG      = "#0b0f14"
-PANEL   = "#141a22"
-BORDER  = "#262f3a"
-PANEL_ALT = "#101720"
-CARD_EDGE = "#334155"
-GRID    = "#0f1722"
-GREEN   = "#2ce391"
-RED     = "#ff4d6d"
-AMBER   = "#ffb000"
-ACCENT  = "#3ddbd9"
-ACCENT_SOFT = "#1f3f48"
-BLUE    = "#67b7ff"
-ROSE    = "#ff7aa2"
-MUTED   = "#6b7280"
-WHITE   = "#f2f4f7"
-DIM     = "#98a2b3"
-
-MONO_SM  = ("Consolas", 9)
-MONO_MD  = ("Consolas", 10)
-MONO_LG  = ("Consolas", 12, "bold")
-MONO_HDR = ("Consolas", 15, "bold")
-
-
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
-
-class _ToggleRow:
-    def __init__(
-        self,
-        parent: tk.Widget,
-        title: str,
-        on_toggle,
-    ) -> None:
-        self.on_toggle = on_toggle
-        self._active: bool | None = None
-
-        self._outer = tk.Frame(
-            parent, bg=PANEL_ALT,
-            highlightthickness=1,
-            highlightbackground=CARD_EDGE,
-        )
-        self._outer.pack(fill="x", padx=20, pady=4)
-
-        accent = tk.Frame(self._outer, bg=ACCENT, width=4)
-        accent.pack(side="left", fill="y")
-
-        left = tk.Frame(self._outer, bg=PANEL_ALT)
-        left.pack(side="left", fill="both", expand=True, padx=14, pady=12)
-
-        tk.Label(
-            left, text=title, font=MONO_LG,
-            fg=WHITE, bg=PANEL_ALT, anchor="w",
-        ).pack(anchor="w")
-
-        self._sub_lbl = tk.Label(
-            left, text="",
-            font=MONO_SM, fg=DIM, bg=PANEL_ALT,
-            anchor="w", justify="left", wraplength=360,
-        )
-        self._sub_visible = False
-
-        right = tk.Frame(self._outer, bg=PANEL_ALT, width=260)
-        right.pack(side="right", padx=18, pady=12)
-
-        self._status_lbl = tk.Label(
-            right, text="reading\u2026",
-            font=("Consolas", 10, "bold"), fg=MUTED, bg=PANEL_ALT,
-            anchor="e", justify="right", wraplength=280,
-        )
-        self._status_lbl.pack(anchor="e", pady=(0, 5))
-
-        self._btn = tk.Button(
-            right,
-            text="WAIT",
-            font=("Consolas", 9, "bold"),
-            relief="flat", bd=0,
-            cursor="hand2",
-            padx=12, pady=5,
-            fg=BG, bg=MUTED,
-            activeforeground=BG,
-            activebackground="#7d8796",
-            highlightthickness=1,
-            highlightbackground=BORDER,
-            command=self._click,
-        )
-        self._btn.pack(anchor="e")
-
-    # ------------------------------------------------------------------
-    def update(
-        self,
-        active: bool | None,
-        active_label: str,
-        inactive_label: str,
-        btn_when_active: str,
-        btn_when_inactive: str,
-    ) -> None:
-        self._active = active
-
-        if active is None:
-            self._status_lbl.config(text="UNKNOWN", fg=AMBER)
-            self._btn.config(
-                text="RETRY", bg=AMBER,
-                activebackground="#cc8800",
-            )
-            return
-
-        if active:
-            self._status_lbl.config(text=f"\u25cf  {active_label}", fg=GREEN)
-            self._btn.config(
-                text=btn_when_active,
-                fg=GREEN, bg="#00221a",
-                activebackground="#003328",
-                highlightthickness=1,
-                highlightbackground="#00553a",
-            )
-        else:
-            self._status_lbl.config(text=f"\u25cb  {inactive_label}", fg=RED)
-            self._btn.config(
-                text=btn_when_inactive,
-                fg=RED, bg="#200010",
-                activebackground="#300018",
-                highlightthickness=1,
-                highlightbackground="#550022",
-            )
-
-    def set_subtitle(self, text: str) -> None:
-        if text:
-            if not self._sub_visible:
-                self._sub_lbl.pack(anchor="w", pady=(4, 0))
-                self._sub_visible = True
-            self._sub_lbl.config(text=text)
-        else:
-            if self._sub_visible:
-                self._sub_lbl.pack_forget()
-                self._sub_visible = False
-
-    def update_custom(
-        self,
-        status_text: str,
-        status_fg: str,
-        btn_text: str,
-        btn_fg: str,
-        btn_bg: str,
-        btn_activebg: str,
-        btn_highlight: str,
-        btn_state: str = "normal",
-        btn_cursor: str = "hand2",
-        active_state: bool | None = None,
-    ) -> None:
-        self._active = active_state
-        self._status_lbl.config(text=status_text, fg=status_fg)
-        self._btn.config(
-            text=btn_text,
-            fg=btn_fg,
-            bg=btn_bg,
-            activebackground=btn_activebg,
-            highlightthickness=1,
-            highlightbackground=btn_highlight,
-            state=btn_state,
-            cursor=btn_cursor,
-        )
-
-    def _click(self) -> None:
-        self.on_toggle(self._active)
-
-    def show(self) -> None:
-        self._outer.pack(fill="x", padx=20, pady=4)
-
-    def hide(self) -> None:
-        self._outer.pack_forget()
 
 
 # ---------------------------------------------------------------------------
