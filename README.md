@@ -1,3 +1,5 @@
+Join the Server: https://discord.gg/82Mwq8Wj
+
 # HyperSwitch
 
 HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS, Driver Signature Enforcement, CPU virtualization state, and a small set of related troubleshooting controls from one place.
