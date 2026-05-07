@@ -1,5 +1,14 @@
 # HyperSwitch 2.0 Release Notes
 
+## HyperSwitch 2.0.1
+
+HyperSwitch 2.0.1 is a focused hotfix release for the updater and release track behavior.
+
+### Hotfixes
+
+- Stable builds now prefer stable GitHub releases during update checks instead of considering prerelease tags
+- Release metadata and packaged output are aligned for the `2.0.1` line
+
 ## HyperSwitch 2.0.0
 
 HyperSwitch 2.0 is the first full productized release of the utility: a cleaner, safer, and more supportable Windows troubleshooting console for Hyper-V, VBS, DSE, and related platform checks.

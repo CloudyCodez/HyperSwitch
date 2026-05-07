@@ -8,7 +8,7 @@ HyperSwitch is a Windows desktop utility for checking and toggling Hyper-V, VBS,
 
 HyperSwitch `2.0` is now released.
 
-Current stable version: `2.0.0`
+Current stable version: `2.0.1`
 
 - Release notes: `docs/RELEASE-NOTES-2.0.md`
 - Roadmap: `docs/ROADMAP-2.0.md`

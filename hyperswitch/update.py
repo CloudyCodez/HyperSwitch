@@ -86,7 +86,7 @@ def release_page_url() -> str:
 
 
 def check_for_updates(current_version: str) -> UpdateProbe:
-    releases = _fetch_releases()
+    releases = _fetch_releases(include_prerelease=is_prerelease_version(current_version))
     if not releases:
         return UpdateProbe(
             status="unavailable",
@@ -140,6 +140,11 @@ def compare_versions(left: str, right: str) -> int:
     if left_clean > right_clean:
         return 1
     return 0
+
+
+def is_prerelease_version(value: str) -> bool:
+    version_key = _parse_version_key(value)
+    return bool(version_key and version_key.prerelease)
 
 
 def install_target_for_executable(executable_path: str) -> tuple[str, str]:
@@ -237,7 +242,7 @@ def launch_update_installer(zip_path: str, install_dir: str, restart_relative_pa
     )
 
 
-def _fetch_releases() -> list[ReleaseInfo]:
+def _fetch_releases(include_prerelease: bool) -> list[ReleaseInfo]:
     request = urllib.request.Request(
         RELEASES_API_URL,
         headers={
@@ -253,6 +258,8 @@ def _fetch_releases() -> list[ReleaseInfo]:
         if not isinstance(item, dict):
             continue
         if item.get("draft"):
+            continue
+        if not include_prerelease and item.get("prerelease"):
             continue
 
         tag_name = str(item.get("tag_name", "")).strip()
